@@ -575,6 +575,7 @@ def sec_firewall():
 
 
 CONTAINERS = []
+SERVED_NAMES = set()  # hostnames the web server configs serve (certificates for other names are leftovers)
 
 
 def docker_status(status):
@@ -1197,6 +1198,7 @@ def sec_services():
 
 
 CRON_LINES = []
+CRON_HOME = {}  # cron line -> home of the user it runs as (relative and ~/ paths resolve there)
 CRON_STATE = []
 CRON_MAILTO = set()
 
@@ -1234,9 +1236,13 @@ def sec_cron():
             else:
                 runas, cmd = (fields[5], fields[6:]) if not l.startswith("@") and len(fields) > 6 \
                     else ((fields[1], fields[2:]) if len(fields) > 2 else ("?", []))
+            try:
+                CRON_HOME[l] = pwd.getpwnam(runas).pw_dir
+            except KeyError:
+                pass
             if runas == "root" and cmd:
-                for tok in cmd:
-                    if tok.startswith("/") and os.path.isfile(tok) and writable_by_non_root(tok):
+                for tok in sorted(job_files(" ".join(cmd), CRON_HOME.get(l))):
+                    if writable_by_non_root(tok):
                         st2 = os.stat(tok)
                         flag("cron", "root cron runs %s which is writable by non-root (%s %s)"
                              % (tok, mode_str(st2), owner_str(st2)))
@@ -1375,6 +1381,7 @@ def nginx_report(text):
         emit("  %-40s %-28s %-12s %s" % (names[:40], ",".join(s["listen"])[:28], s["protected"] or "none",
                                          " ".join(open_locs)[:80]))
         sites.append("%s [%s] %s" % (names, ",".join(sorted(s["listen"])), s["protected"] or "open"))
+        SERVED_NAMES.update(n.lower() for n in s["names"] if n != "_")
         targets = [("server " + names, s["protected"], s["content"], s["autoindex"])] + \
                   [(l["path"], l["protected"], l["content"], l["autoindex"]) for l in s["locations"]]
         for path, prot, content, autoindex in targets:
@@ -1690,6 +1697,7 @@ def traefik_report(static, flats):
     for name, r in sorted(routers.items()):
         rule = r.get("rule", "")
         hosts = _rule_hosts(rule)
+        SERVED_NAMES.update(h.lower() for h in hosts)
         paths = re.findall(r"Path(?:Prefix)?\(\s*`([^`]+)`", rule)
         prot = [_mw_protects(m, mws) for m in r["middlewares"]]
         protected = any(prot)
@@ -1945,6 +1953,11 @@ def sec_web():
                 if depth == 0:
                     site = None
             state("web", "caddy_sites " + f, [x for x in per_site if x != "(global options)"])
+            for site in per_site:
+                for a in re.split(r"[\s,]+", site):
+                    a = re.sub(r"^\w+://", "", a).split("/")[0].rsplit(":", 1)[0].lower()
+                    if a and "." in a:
+                        SERVED_NAMES.add(a)
             for s, info in per_site.items():
                 if s == "(global options)":
                     continue
@@ -1981,6 +1994,16 @@ def sec_web():
         emit("  none")
 
 
+def name_served(cn, served):
+    """True when a certificate name matches a served hostname (wildcards on either side)."""
+    cn = cn.lower()
+    for n in served:
+        if cn == n or (cn.startswith("*.") and n.endswith(cn[1:]) and n.count(".") == cn.count(".")) \
+                or (n.startswith("*.") and cn.endswith(n[1:]) and cn.count(".") == n.count(".")):
+            return True
+    return False
+
+
 def sec_tls():
     header("TLS CERTIFICATES (local stores)")
     pats = ["/var/lib/caddy/.local/share/caddy/certificates/*/*/*.crt",
@@ -2003,9 +2026,15 @@ def sec_tls():
         except ValueError:
             continue
         days = (end - now).days
-        emit("  %-40s %4d days  (%s)" % (subj.group(1) if subj else c, days, iss.group(1) if iss else "?"))
+        cn = subj.group(1).strip() if subj else c
+        emit("  %-40s %4d days  (%s)" % (cn, days, iss.group(1) if iss else "?"))
         if days < 14:
-            flag("tls", "certificate %s expires in %d days" % (subj.group(1) if subj else c, days))
+            if SERVED_NAMES and not name_served(cn, SERVED_NAMES):
+                emit("    note: %s is not served by any site in the current web server config — a leftover in "
+                     "the store (%s); remove it if the domain is gone" % (cn, "expired" if days < 0 else "expiring"))
+            else:
+                flag("tls", "certificate %s %s" % (cn, "expired %d days ago" % -days if days < 0
+                                                   else "expires in %d days" % days))
 
 
 KEYFILE = re.compile(r"(?i)(^id_(rsa|ecdsa|ed25519|dsa)$|\.key$|privkey.*\.pem$|\.p12$|\.pfx$|\.kdbx$|^\.pgpass$|"
@@ -2030,6 +2059,32 @@ def classify(path):
     if n is None or DATAFILE.search(fn):
         return "data", "database/dump/binary", True
     return "text", "%d secret-like values" % n, n > 0
+
+
+_READERS = []
+
+
+def readers_note():
+    """Who "every local user" is here: the service accounts behind listening ports read world-readable files
+    too, so a hole in one of those services reads them even on a host with one human user."""
+    if not _READERS:
+        svc = {}
+        for pr, a, p, n, pid, k in LISTEN:
+            # loopback counts: an app on 127.0.0.1 behind the reverse proxy takes internet traffic all the same
+            if pr != "tcp" or re.match(r"systemd-|_?chrony|messagebus|dnsmasq", n):
+                continue
+            try:
+                uid = os.stat("/proc/%s" % pid).st_uid if pid else 0
+                name = pwd.getpwuid(uid).pw_name
+            except (OSError, KeyError):
+                continue
+            if uid != 0:
+                svc.setdefault(name, set()).add(re.sub(r"\s*\(.*$", "", n.split(",")[0]))
+        accts = ["%s (%s)" % (u, ", ".join(sorted(ps)[:3])) for u, ps in sorted(svc.items())
+                 if not u.startswith("systemd-")]
+        _READERS.append(" — including the accounts that run network services: %s%s"
+                        % (", ".join(accts[:5]), ", …" if len(accts) > 5 else "") if accts else "")
+    return _READERS[0]
 
 
 def sec_files():
@@ -2063,8 +2118,8 @@ def sec_files():
             emit("  %s %-20s %10d %5.0fd %-3s %-28s %s" % (mode_str(st), owner_str(st), st.st_size, age,
                                                            "yes" if world else "no", detail[:28], path))
             if world and worth and not EXAMPLE_PATH.search(path):
-                flag("files", "readable by every local user: %s (%s %s, %s)"
-                     % (path, mode_str(st), owner_str(st), detail))
+                flag("files", "readable by every local user: %s (%s %s, %s)%s"
+                     % (path, mode_str(st), owner_str(st), detail, readers_note()))
     if n > 800:
         emit("  ... %d more files not listed" % (n - 800))
     emit("")
@@ -2172,6 +2227,32 @@ def _paths_in(text):
     return {t.rstrip(";'\")") for t in re.findall(r"(/[\w.\-/]{3,})", text)}
 
 
+SCRIPT_TOKEN = re.compile(r"(?:^|[\s;&|(])((?:\./|~/|\$HOME/|\$\{HOME\}/)?[\w.\-/]+\.(?:py|sh|bash|pl|rb|php|js))(?=$|[\s;&|)])")
+
+
+def job_files(line, home=None):
+    """Files a cron/timer line runs: absolute paths, and relative ones resolved the way cron does — after
+    `cd DIR`, or in the home of the user the line runs as (`cd ~/app && python3 backup.py`)."""
+    files = {p for p in _paths_in(line) if os.path.isfile(p)}
+    m = re.search(r"\bcd\s+([^\s;&|]+)", line)
+    base = home
+    if m:
+        d = m.group(1).strip("'\"")
+        if d.startswith(("~/", "$HOME/", "${HOME}/")) and home:
+            d = os.path.join(home, d.split("/", 1)[1])
+        base = d if os.path.isabs(d) else (os.path.join(home, d) if home else None)
+    for tok in SCRIPT_TOKEN.findall(line):
+        if tok.startswith(("~/", "$HOME/", "${HOME}/")):
+            p = os.path.join(home, tok.split("/", 1)[1]) if home else None
+        elif tok.startswith("/"):
+            p = tok
+        else:
+            p = os.path.join(base, tok[2:] if tok.startswith("./") else tok) if base else None
+        if p and os.path.isfile(p):
+            files.add(os.path.normpath(p))
+    return files
+
+
 # timers the distribution ships for its own housekeeping: not a backup of the operator's data
 SYSTEM_TIMERS = {"dpkg-db-backup.timer"}
 SYSTEM_BIN = ("/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/", "/usr/lib/", "/lib/", "/usr/share/", "/usr/libexec/")
@@ -2185,7 +2266,7 @@ def sec_backups():
         # the cron line itself ("... /home/x/sync.sh") often says nothing; the script it runs does
         if kw.search(line):
             return True
-        for tok in _paths_in(line):
+        for tok in job_files(line, CRON_HOME.get(line)):
             if os.path.isfile(tok) and os.path.getsize(tok) < 200_000 and secret_count(tok) is not None \
                     and not tok.startswith(SYSTEM_BIN) and kw.search(read(tok) or ""):
                 return True
@@ -2204,9 +2285,9 @@ def sec_backups():
     job_texts, job_scripts = [], []
     for src, l in jobs:
         emit("  [%s] %s" % (src, secretlib.mask(l)[:220]))
-        cands = _paths_in(l)
+        cands = _paths_in(l) | job_files(l, CRON_HOME.get(l))
         text = l
-        for tok in list(cands):  # follow one level into scripts the job runs
+        for tok in sorted(job_files(l, CRON_HOME.get(l))):  # follow one level into scripts the job runs
             if os.path.isfile(tok) and os.path.getsize(tok) < 200_000 and secret_count(tok) is not None \
                     and not tok.startswith(SYSTEM_BIN):
                 body = read(tok) or ""
@@ -2689,7 +2770,7 @@ def sec_processes():
 
 # ---------------------------------------------------------------- main
 # Facts one section reads from another: backups and processes look at the cron lines.
-NEEDS = {"backups": ["cron"], "processes": ["cron"], "podman": ["network"]}
+NEEDS = {"backups": ["cron"], "processes": ["cron"], "podman": ["network"], "files": ["network"], "tls": ["web"]}
 
 
 def run_quietly(fn, name):

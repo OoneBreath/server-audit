@@ -254,5 +254,52 @@ class Podman(unittest.TestCase):
         self.assertIn(("unpinned", "docker.io/grafana/grafana:latest"), kinds)
         self.assertNotIn("Description", collect.quadlet_parse(QUADLET))  # only the [Container] section
 
+
+class JobsCertsReaders(unittest.TestCase):
+    def test_job_files_resolve_relative_scripts(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(d, "server-backup"))
+            for f in ("server-backup/backup.py", "run.sh"):
+                open(os.path.join(d, f), "w").write("#!/bin/sh\n")
+            app = os.path.join(d, "server-backup")
+            line = "30 3 * * * cd %s && flock -n /tmp/sb.lock python3 backup.py >> logs/cron.log 2>&1" % app
+            self.assertIn(os.path.join(app, "backup.py"), collect.job_files(line))
+            self.assertIn(os.path.join(app, "backup.py"),
+                          collect.job_files("cd ~/server-backup && python3 backup.py", home=d))
+            self.assertIn(os.path.join(d, "run.sh"), collect.job_files("@daily ./run.sh", home=d))
+            self.assertIn(os.path.join(d, "run.sh"), collect.job_files("@daily bash $HOME/run.sh", home=d))
+            self.assertEqual(collect.job_files("@daily python3 missing.py", home=d), set())
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_name_served(self):
+        served = {"shop.example.com", "*.apps.example.com"}
+        self.assertTrue(collect.name_served("shop.example.com", served))
+        self.assertTrue(collect.name_served("x.apps.example.com", served))
+        self.assertTrue(collect.name_served("*.example.com", {"shop.example.com"}))
+        self.assertFalse(collect.name_served("old.example.com", served))
+        self.assertFalse(collect.name_served("*.example.com", {"a.b.example.com"}))
+
+    def test_readers_note_names_service_accounts(self):
+        import pwd
+        saved = list(collect.LISTEN), list(collect._READERS)
+        try:
+            del collect._READERS[:]
+            collect.LISTEN[:] = [("tcp", "0.0.0.0", "8080", "python3", str(os.getpid()), "ALL"),
+                                 ("tcp", "127.0.0.1", "9000", "gunicorn", str(os.getpid()), "loopback"),
+                                 ("udp", "0.0.0.0", "68", "dhclient", str(os.getpid()), "ALL")]
+            note = collect.readers_note()
+            if os.geteuid() == 0:
+                self.assertEqual(note, "")
+            else:
+                self.assertIn("%s (gunicorn, python3)" % pwd.getpwuid(os.geteuid()).pw_name, note)  # grouped
+                self.assertIn("gunicorn", note)       # behind the proxy: still reachable
+                self.assertNotIn("dhclient", note)    # udp housekeeping
+        finally:
+            collect.LISTEN[:], collect._READERS[:] = saved
+
 if __name__ == "__main__":
     unittest.main()

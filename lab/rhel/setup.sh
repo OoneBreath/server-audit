@@ -60,7 +60,8 @@ tar czf /var/backups/shop/shop-$(date +%F).tgz /opt/shop /srv/www
 rclone sync /var/backups/shop gcrypt:web-01 >> /var/log/shop/offsite.log 2>&1 && echo "$(date -Is) offsite OK" >> /var/log/shop/offsite.log
 EOS
 chmod 755 /usr/local/sbin/shop-offsite.sh
-echo '30 3 * * * root /usr/local/sbin/shop-offsite.sh' > /etc/cron.d/shop-offsite
+# run the way many crontabs do: cd, then a relative script (the audit must still follow it)
+echo '30 3 * * * root cd /usr/local/sbin && ./shop-offsite.sh' > /etc/cron.d/shop-offsite
 tar czf /var/backups/shop/shop-2026-11-01.tgz /srv/www 2>/dev/null
 
 # HAProxy: the runtime API on the network, a stats page without auth, /admin routed without auth, a plain-text

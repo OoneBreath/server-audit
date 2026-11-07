@@ -1,7 +1,7 @@
 ---
 name: server-audit
 description: This skill should be used when the user asks to audit, security-check or harden a Linux server or VPS they run (Ubuntu, Debian, RHEL family; Caddy, nginx, Apache, Traefik, HAProxy; Docker, Podman), e.g. "audit this server", "security check the VPS", "what is exposed to the internet", "check open ports / firewall / SSH", "are there secrets lying around on the box", "is Docker bypassing ufw", "check the Caddy/nginx auth on admin routes", "audyt serwera", "sprawdź bezpieczeństwo VPS", "co jest wystawione do internetu", "compare my servers", or after an incident (leaked key, outage, unexpected login) to find what else is wrong. Read-only inventory of the host (ports, firewall incl. Docker, SSH, users and sudo, services, reverse proxy, TLS, secrets and permissions, backups, disk, updates and end of support, DNS and mail authentication, AI agents and injection text), drift since the last audit, comparison of several hosts, verification of every finding (outside-in from another host where possible), a severity-ranked report, and fixes only after explicit approval. Not for reviewing application source code.
-version: 0.4.0
+version: 0.4.1
 ---
 
 # Server audit

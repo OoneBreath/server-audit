@@ -219,6 +219,10 @@ How exposed a secret is matters more than where it is:
   anything other than its own app = HIGH; on loopback-only with no other local users = MEDIUM.
 - Backups and dumps (`*.sql.gz`, `.db` copies, `*.bak` of config.ini) hold the same secrets and the
   data; world-readable dumps in a traversable directory = MEDIUM–HIGH.
+- **"Readable by every local user" on a host with one human user is not noise.** The accounts that run
+  network services (listed in the candidate: the reverse proxy, app servers, also those on 127.0.0.1 behind
+  the proxy) read the file too, so one hole in any of those apps reads every world-readable `.env`, key and
+  dump. Rate it by the most exposed of those services; LOW only when no service runs as another account.
 - Git: for every flagged repo, find out where it is pushed (`git remote -v`) and whether that remote
   is public (`gh repo view --json visibility` if gh is signed in, otherwise ask). History findings
   stay in clones and forks after a rewrite — rotation is still required.
@@ -272,6 +276,8 @@ code that reads secrets from the environment.
 - TLS 1.0/1.1 accepted = LOW–MEDIUM. Missing HSTS on sites with logins = LOW.
 - Self-signed certificates on admin panels are acceptable only behind an IP allowlist or tunnel.
 - Mail stacks often fail ACME for `autodiscover`/`autoconfig` names: note, usually LOW.
+- A certificate in a store (Caddy keeps every certificate it ever issued) for a name no current site config
+  serves is a leftover: the inventory notes it instead of flagging it. Expired and unused = remove it.
 
 ## 9. Backups & recovery
 
@@ -307,6 +313,11 @@ code that reads secrets from the environment.
   offsite copy follow the host: a file deleted or encrypted here (a bad `rm`, ransomware) is gone offsite
   after the next run, unless the destination keeps versions the host cannot purge. Use `copy`,
   `--backup-dir`, or dated snapshots (restic, borg).
+- **Before reporting "only on this host" or "alerts nobody", read the job.** The inventory follows the
+  script a cron line or timer runs one level deep, relative ones included (`cd ~/server-backup && python3
+  backup.py`, `./run.sh`, `$HOME/…`), plus config files next to it. A backup that a second script, a
+  config elsewhere or a systemd unit's `EnvironmentFile` drives can still look local: open the script
+  (`sed -n 1,80p`, never `cat` a config with credentials) before calling it a finding.
 - **Does a failure reach a human?** A job with no mail/webhook and no `MAILTO` fails silently. A job that
   alerts into an inbox nobody reads is the same: ask when the last alert was read. Check the job's log:
   the last status line (`backup log …, last status line`) shows FAILED/PARTIAL/STALE runs the directory

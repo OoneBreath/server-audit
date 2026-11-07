@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.1: fixes from the server3 audit
+
+Released 7 November 2026. Reported after a v0.3.1 audit of a production Ubuntu 24.04 host, where the agent
+had to drop three of the skill's candidates by hand.
+
+- **Backups run through a relative script were missed.** A crontab line such as `cd ~/server-backup &&
+  flock -n /tmp/sb.lock python3 backup.py` names no absolute script, so the inventory never read
+  `backup.py` (rclone to an encrypted Google Drive remote, mail on failure) and reported "backups exist
+  only on this host" and "failures alert nobody". Jobs now resolve scripts the way cron does: after `cd
+  DIR`, and in the home of the user the line runs as (`./run.sh`, `~/…`, `$HOME/…`). The same applies to
+  "root cron runs a script writable by non-root".
+- **Leftover certificates**: Caddy keeps every certificate it ever issued. An expiring or expired one for a
+  name no current site config (Caddy, nginx, Traefik) serves is now a note ("a leftover in the store"),
+  not a candidate.
+- **"Readable by every local user" says who that is**: the accounts that run network services, apps on
+  127.0.0.1 behind the reverse proxy included. On a host with one human user these files are still read by
+  a hole in any of those services, so the candidate is not noise.
+- Lab: the RHEL lab's offsite job runs as `cd /usr/local/sbin && ./shop-offsite.sh`.
+
 ## 0.4.0: several servers, Podman, Traefik, HAProxy
 
 Released 7 November 2026.
