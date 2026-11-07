@@ -142,8 +142,9 @@ Rules:
 
 **Offsite copies the host cannot destroy:** credentials that can delete the remote copy should not live
 on the host that is being protected. In order of effort: enable provider-side versioning/trash retention
-(S3 versioning + object lock, B2 lifecycle with hidden versions; Google Drive trash is not enough if the
-token can empty it); an append-only repository (restic `rest-server --append-only`, borg
+(S3 versioning + object lock; B2: a key without `deleteFiles` and a bucket set to keep all versions — a
+lifecycle rule that deletes hidden files turns a write-only key into a delete key; Google Drive trash is not
+enough, the same token can empty it); an append-only repository (restic `rest-server --append-only`, borg
 `borg serve --append-only` in the server's `authorized_keys`); or a pull-based copy made by another machine
 with read-only access to this one. Separate credentials per host, so one compromised host cannot touch the
 others' backups.

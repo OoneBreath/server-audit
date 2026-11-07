@@ -253,13 +253,28 @@ code that reads secrets from the environment.
   data). Provider snapshots count only if the operator confirms they exist and are paid for.
 - Backups readable by every local user, or stored inside a web root or a git working tree = MEDIUM.
 - **Report the backup ladder**, as far as the evidence goes: `exists → fresh → offsite → encrypted →
-  restore-tested`. The host shows the first four (`backup ladder` line in BACKUPS); a restore test only the
-  operator can confirm — until then the backup is not `verified`.
-- **Can root here delete the offsite copies?** Push-based offsite backups (rclone, restic, aws s3) keep
-  their credentials on the host: an attacker with root, or ransomware, deletes the remote copies too.
-  Mitigations: versioning/object lock, an append-only repository (restic rest-server `--append-only`,
-  borg `append_only`), a separate pull-based copy from another machine, or at least provider trash/version
-  history the host's credentials cannot purge. MEDIUM when the host holds customer data.
+  safe from this host → restore-tested`. The host shows the first five (`backup ladder` line in BACKUPS); a
+  restore test only the operator can confirm — until then the backup is not `verified`.
+- **Can the credentials on this host delete the offsite copy?** Push-based offsite backups (rclone, restic,
+  borg, aws s3) keep their credentials on the host: an attacker with root, ransomware, or an agent following
+  injected text deletes the remote copies too. `deletable_from_host` in the ladder:
+  - `yes` when the job itself deletes offsite data (`restic forget/prune`, `borg prune/compact`,
+    `rclone delete/purge/cleanup`, `aws s3 rm`, `duplicity remove-*`): a key that prunes can erase
+    everything. Or when the rclone remote is a Drive-like token (drive, dropbox, onedrive, sftp, webdav…,
+    also under a `crypt` remote): it deletes what it wrote and empties the trash.
+  - `unknown` for buckets (b2, s3, gcs, azure), restic `rest:`/`sftp:` and borg over SSH: it depends on
+    the key's rights and the destination's settings, which the host cannot see. The inventory prints what
+    to check. **B2:** a write-only key (no `deleteFiles`) is not enough on its own — a lifecycle rule with
+    `daysFromHidingToDeleting` lets it delete, because `writeFiles` may hide a file and the rule then erases
+    it; the bucket must keep all versions. **S3:** versioning plus Object Lock, and an IAM policy without
+    `s3:DeleteObjectVersion`, `s3:PutBucketVersioning` or `s3:PutLifecycleConfiguration`.
+  Mitigations: prune from another machine with a separate key, versioning/object lock, an append-only
+  repository (restic rest-server `--append-only`, borg `append_only`), or a pull-based copy from another
+  machine. MEDIUM when the host holds customer data.
+- **Does the job mirror deletions?** `rclone sync`, `rsync --delete` and `aws s3 sync --delete` make the
+  offsite copy follow the host: a file deleted or encrypted here (a bad `rm`, ransomware) is gone offsite
+  after the next run, unless the destination keeps versions the host cannot purge. Use `copy`,
+  `--backup-dir`, or dated snapshots (restic, borg).
 - **Does a failure reach a human?** A job with no mail/webhook and no `MAILTO` fails silently. A job that
   alerts into an inbox nobody reads is the same: ask when the last alert was read. Check the job's log:
   the last status line (`backup log …, last status line`) shows FAILED/PARTIAL/STALE runs the directory

@@ -55,8 +55,11 @@ class Lab:
         cls.fake = []
         for f in cls.secret_files:
             body = sh(*x, "cat", f)
-            cls.fake += [l.split("=", 1)[1] for l in body.splitlines() if "=" in l and not l.startswith("APP_ENV")]
+            if f.endswith(".env") or "/etc/" in f:
+                cls.fake += [l.split("=", 1)[1] for l in body.splitlines() if "=" in l and not l.startswith("APP_ENV")]
             cls.fake += re.findall(r'"auth": "([^"]+)"', body)
+            cls.fake += re.findall(r'"access_token":"([^"]+)"', body)
+            cls.fake += re.findall(r"(?m)^password = (\S+)$", body)
         cls.ip = sh("docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
                     cls.name).strip()
         cls.probe = cls.run_probe()
@@ -139,6 +142,7 @@ class UbuntuLab(Lab, unittest.TestCase):
         for section in ("host", "network", "ssh", "users", "cron", "backups", "candidates", "_meta"):
             self.assertIn(section, self.state2)
         self.assertEqual(self.state2["backups"]["ladder"]["offsite"], "no")
+        self.assertEqual(self.state2["backups"]["ladder"]["deletable_from_host"], "n/a (no offsite copy)")
 
     def test_secret_scan(self):
         s = self.secrets
@@ -160,7 +164,7 @@ class UbuntuLab(Lab, unittest.TestCase):
 @unittest.skipUnless(ENABLED, "set SERVER_AUDIT_E2E=1 (needs Docker)")
 class RhelLab(Lab, unittest.TestCase):
     lab, hostname = "rhel", "web-01"
-    secret_files = ("/opt/shop/.env",)
+    secret_files = ("/opt/shop/.env", "/root/.config/rclone/rclone.conf")
 
     @classmethod
     def run_probe(cls):
@@ -181,6 +185,8 @@ class RhelLab(Lab, unittest.TestCase):
             "SELinux is Disabled on a RHEL-family host",
             "SUID/SGID binary not from a package: /usr/local/bin/findx",
             "readable by every local user: /opt/shop/.env",
+            "the offsite backup can be deleted from this host: rclone remote gcrypt over gdrive (drive)",
+            "rclone sync mirrors deletions to the offsite copy",
         ])
         self.assertNotIn("/private/", self.candidates())  # protected by auth_basic
 
@@ -189,6 +195,17 @@ class RhelLab(Lab, unittest.TestCase):
         self.assertIn("end of standard support: 2032-05-31", self.inv1)
         self.assertIn("dnf: no usable local metadata cache", self.inv1)
         self.assertIn("nginx_sites", self.state2.get("web", {}))
+        ladder = self.state2["backups"]["ladder"]
+        self.assertEqual((ladder["offsite"], ladder["encrypted"], ladder["deletable_from_host"]),
+                         ("rclone", "yes", "yes"))
+
+    def test_only_backups_still_sees_cron_jobs(self):
+        x = ["docker", "exec", self.name]
+        sh(*x, "python3", "-I", "/usr/local/lib/server-audit/collect.py", "--only", "backups", "--out", "/root/only")
+        inv = sh(*x, "cat", "/root/only/inventory.txt")
+        self.assertIn("offsite=rclone", inv)
+        self.assertIn("the offsite backup can be deleted from this host", inv)
+        self.assertNotIn("== CRON & TIMERS", inv)
 
     def test_probe_from_outside(self):
         self.assertRegex(self.probe, r"80 open")

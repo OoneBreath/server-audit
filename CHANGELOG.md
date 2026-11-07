@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.1: backups that survive the host, fewer false alarms
+
+Released 7 November 2026.
+
+- **Can the offsite backup be deleted from this host?** A new rung in the backup ladder,
+  `deletable_from_host`. `yes` when the job itself prunes or deletes offsite data (restic forget/prune,
+  borg prune/compact, rclone delete/purge/cleanup, aws s3 rm, duplicity remove-*) or the rclone remote is
+  a Drive-like token, also under a crypt remote. `unknown` for buckets, restic `rest:`/`sftp:` and borg over
+  SSH, with what to check: for B2, the key's capabilities and lifecycle rules (a rule that deletes hidden
+  files lets a write-only key delete; thanks to the `b2-key-check` in mattabate/life-distributable for
+  that point); for S3, versioning, Object Lock and the IAM policy.
+- **Jobs that mirror deletions offsite** (`rclone sync` without `--backup-dir`, `rsync --delete` to
+  another host, `aws s3 sync --delete`) are flagged: ransomware here becomes ransomware there.
+- **find_secrets on source trees**: 30 false hits on a real open-source repo dropped to 2 true ones.
+  No longer reported: `fetch()` options (`credentials: 'same-origin'`), status words (`unknown`), shell
+  expansions (`$(cat …)`, `` `cmd` ``, `"$DIR/.token"`), keys that describe a secret (`TOKEN_FILE`,
+  `SESSION_TOKEN_TTL`), calls and indexes (`token=auth["…"]`), ternaries (`ok ? 'PASS' : 'FAIL'`),
+  `date -u +%Y…` read as curl's `-u USER:PASSWORD`. Test files by name (`_test.go`, `test_*.py`, `*.spec.ts`,
+  `*Tests.swift`) count as examples. Public-by-design keys (PostHog `phc_`, Stripe `pk_`, Mapbox `pk.`)
+  are counted, not listed. Masking is unchanged: these lines are still redacted in inventories.
+- **`--only backups` was wrong**: the cron jobs it relies on come from the cron section, which a partial
+  run skipped, so it reported "backups exist only on this host" and a stale backup. Sections a partial run
+  depends on now run quietly (no output, no candidates, no state).
+- **Drift noise**: a backup timer's last start time, PID and exit status no longer count as a change;
+  `dpkg-db-backup.timer` (the distribution's own housekeeping) is no longer a backup job.
+- Lab: the RHEL lab has an rclone crypt-over-Drive offsite copy synced with `rclone sync`.
+
 ## 0.3.0: beyond Ubuntu and Caddy
 
 Released 6 November 2026.

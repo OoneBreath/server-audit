@@ -41,7 +41,7 @@ URL_CREDS = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@'\"]+:)([^/\s@'\"]+)
 # CLI arguments that carry secrets: --password=X, --token X, curl -u user:X, mysql -pX
 CLI_ARG = re.compile(
     r"(?i)(--(?:password|passwd|pass|token|secret|api-key|apikey|auth-token|key)[= ])(\S+)"
-    r"|(\s-u\s+[^:\s]+:)(\S+)"
+    r"|(\s-u\s+[^:\s+%][^:\s]*:)(\S+)"  # not `date -u +%Y-%m-%dT%H:%M`
     r"|(\bmysql(?:dump)?\b[^\n]*?\s-p)(\S+)"
 )
 
@@ -142,6 +142,32 @@ def _redacted(value):
     return "<REDACTED len=%d fp=%s>" % (len(value), fingerprint(value))
 
 
+# Detection only (lenient): values and keys that are ordinary code or metadata, never credentials.
+# Masking ignores these rules, so a line that matches them is still redacted in inventories.
+# shell expansions: $(cmd), `cmd`, a path built on a variable ("$DIR/.token")
+SHELL_EXPANSION = re.compile(r"^(?:\$\(|`|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/)")
+# fetch()/CORS options and status words
+NON_SECRET_WORDS = {"same-origin", "same_origin", "include", "omit", "unknown", "required", "optional",
+                    "disabled", "enabled", "inherit", "unset", "empty", "hidden", "masked", "n/a"}
+# key names that describe a secret instead of holding it: TOKEN_FILE, PASSWORD_PATH, SESSION_TOKEN_TTL
+META_KEY = re.compile(r"(?i)[_\-.](?:file|path|dir|url|uri|endpoint|expires?|expiry|ttl|type|length|len|"
+                      r"header|bucket|count|limit|name)$")
+# keys that are public by design (shipped in web pages and apps): PostHog project keys, Stripe publishable
+# keys, Mapbox public tokens. Reported as public-key so the scan can count them apart from secrets.
+PUBLIC_KEY = re.compile(r"^(?:phc_[A-Za-z0-9]{30,}|pk_(?:live|test)_[A-Za-z0-9]{16,}|pk\.eyJ[A-Za-z0-9_\-.]{20,})$")
+# a call or an index on a name: token=auth["authorizationToken"] (the quote ends the captured value)
+CODE_INDEX = re.compile(r"^[A-Za-z_][\w.]*[\[(]$")
+
+
+def _ordinary_code(m, key, val):
+    """True when an assignment match is ordinary code or metadata (detection only)."""
+    if SHELL_EXPANSION.match(val) or val.lower() in NON_SECRET_WORDS or META_KEY.search(key) \
+            or CODE_INDEX.match(val):
+        return True
+    # a ternary branch, not an assignment: ok ? 'PASS' : 'FAIL'
+    return m.string[:m.start("key")].rstrip("'\" ").endswith("?")
+
+
 CODE_EXT = (".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".rb", ".php", ".java", ".kt", ".rs",
             ".cs", ".swift", ".scala", ".c", ".h", ".cpp", ".lua", ".pl", ".vue", ".svelte")
 # values that are code, not secrets: calls, attribute access, collections, None/null
@@ -217,6 +243,11 @@ def scan_line(line: str, code: bool = False, lenient: bool = False):
         # not a credential: unquoted and either several words or one short plain word.
         # UI strings ("password_reset": "Reset your password") — several words are text, not a credential
         if lenient and len(val.split()) >= 3:
+            return m.group(0)
+        if lenient and _ordinary_code(m, key, val):
+            return m.group(0)
+        if lenient and PUBLIC_KEY.match(val):
+            findings.append(_finding("public-key", val, key=key))
             return m.group(0)
         if lenient and ":" in m.group("sep") and not m.group("q2") and (
                 re.search(r"\s", val) or

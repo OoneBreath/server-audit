@@ -1482,6 +1482,8 @@ def _paths_in(text):
     return {t.rstrip(";'\")") for t in re.findall(r"(/[\w.\-/]{3,})", text)}
 
 
+# timers the distribution ships for its own housekeeping: not a backup of the operator's data
+SYSTEM_TIMERS = {"dpkg-db-backup.timer"}
 SYSTEM_BIN = ("/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/", "/usr/lib/", "/lib/", "/usr/share/", "/usr/libexec/")
 
 
@@ -1502,8 +1504,10 @@ def sec_backups():
     rc, timers = run(["systemctl", "list-timers", "--all", "--no-legend", "--no-pager"])
     for l in timers.splitlines():
         m = re.search(r"(\S+\.timer)\s+(\S+\.service)", l)
-        if m and kw.search(m.group(1)):
+        if m and kw.search(m.group(1)) and m.group(1) not in SYSTEM_TIMERS:
             rc, es = run(["systemctl", "show", "-p", "ExecStart", m.group(2)], mask=False)
+            # keep what the job runs, drop when it last ran (start_time, pid, status change every run: drift noise)
+            es = re.sub(r"\s*;\s*(?:start_time|stop_time|pid|code|status)=[^;}]*", "", es)
             jobs.append(("timer " + m.group(1), es))
     emit("scheduled backup-like jobs:")
     scheduled_dirs = set()
@@ -1602,6 +1606,83 @@ def rclone_remotes(conf_text):
     return out
 
 
+# Can the credentials on this host destroy the offsite copy? Read from the job text only (no network).
+# The job itself deleting offsite data proves the key can delete.
+OFFSITE_DELETES = [
+    ("restic forget/prune", re.compile(r"\brestic\b[^\n]*\s(forget|prune)\b")),
+    ("borg prune/compact/delete", re.compile(r"\bborg\b[^\n]*\s(prune|compact|delete)\b")),
+    ("rclone delete/purge/cleanup", re.compile(r"\brclone\s+(?:--?\S+\s+)*(delete|deletefile|purge|cleanup|rmdirs?)\b")),
+    ("aws s3 rm / delete-object", re.compile(r"\baws\s+s3\s+rm\b|\baws\s+s3api\s+delete-objects?\b|\bs3cmd\s+(del|rm)\b")),
+    ("duplicity remove/cleanup", re.compile(r"\bduplicity\s+(?:--?\S+\s+)*(remove-older-than|remove-all-but-n-full|"
+                                            r"remove-all-inc-of-but-n-full|cleanup)\b")),
+]
+# Remotes whose token can delete whatever it wrote (trash or version history included: the same token empties it).
+FULL_ACCESS_REMOTES = {"drive", "dropbox", "onedrive", "box", "pcloud", "mega", "sftp", "ftp", "webdav", "smb",
+                       "jottacloud", "koofr", "yandex", "putio", "seafile", "hidrive", "sharefile", "zoho"}
+# Remotes where it depends on the key's rights and the bucket's versioning or object lock.
+BUCKET_REMOTES = {"s3", "b2", "gcs", "google cloud storage", "azureblob", "swift", "oos", "qingstor", "storj"}
+RESTIC_REPO = re.compile(r"(?:RESTIC_REPOSITORY\s*=\s*[\"']?|\brestic\b[^\n]*\s(?:-r|--repo)[= ]+[\"']?)"
+                         r"([a-z0-9]+):")
+CHECK_BY_KIND = {
+    "b2": "Backblaze → Application Keys: the key this host uses must not have deleteFiles, writeBuckets, "
+          "writeKeys or writeBucketLifecycleRules; Buckets → Lifecycle Settings must be 'Keep all versions' "
+          "(a rule with daysFromHidingToDeleting lets a write-only key delete: it hides a file, the rule erases it)",
+    "s3": "from another machine: aws s3api get-bucket-versioning --bucket BUCKET and "
+          "aws s3api get-object-lock-configuration --bucket BUCKET; the host's IAM policy must not allow "
+          "s3:DeleteObjectVersion, s3:PutBucketVersioning or s3:PutLifecycleConfiguration",
+    "rest": "on the backup server: rest-server runs with --append-only",
+    "ssh-server": "on the backup server: the key in authorized_keys has a forced command "
+                  "(borg serve --append-only, rrsync -wo) or a chroot without delete rights",
+    "borg": "borg config REPO append_only (read-only) or the forced command in the server's authorized_keys",
+}
+
+
+def offsite_protection(all_text, used_remotes, all_remotes, offsite):
+    """(verdict, reasons, checks, mirrors) for the offsite copy, from job text and rclone remote types.
+
+    verdict: "yes" = the credentials here can delete it, "unknown" = depends on settings the host cannot see.
+    Never returns values: only fixed phrases, remote names/types and tool names.
+    """
+    text = re.sub(r"(?m)^\s*#.*$", "", all_text)
+    reasons, checks, mirrors = [], [], []
+    for what, rx in OFFSITE_DELETES:
+        if rx.search(text):
+            reasons.append("the job runs %s, so the key here can delete offsite data" % what)
+    by_name = {r["name"]: r for r in all_remotes}
+    for r in used_remotes:
+        typ, label = r["type"], r["name"]
+        if typ == "crypt" and r.get("remote"):
+            base = by_name.get(r["remote"].split(":", 1)[0])
+            if base:
+                typ, label = base["type"], "%s over %s" % (r["name"], base["name"])
+        if typ in FULL_ACCESS_REMOTES:
+            reasons.append("rclone remote %s (%s): its token can delete what it wrote, and empty the trash" % (label, typ))
+        elif typ in BUCKET_REMOTES:
+            checks.append("rclone remote %s (%s): %s" % (label, typ, CHECK_BY_KIND.get(typ, CHECK_BY_KIND["s3"])))
+    for scheme in sorted(set(RESTIC_REPO.findall(text))):
+        kind = {"b2": "b2", "s3": "s3", "gs": "s3", "azure": "s3", "swift": "s3", "rest": "rest", "sftp": "ssh-server"}.get(scheme)
+        if kind:  # rclone: covered by the rclone remote it names; a local path is not offsite
+            checks.append("restic repository %s: %s" % (scheme, CHECK_BY_KIND[kind]))
+    if "borg" in offsite:
+        checks.append("borg: " + CHECK_BY_KIND["borg"])
+    if "aws s3" in offsite:
+        checks.append("aws s3: " + CHECK_BY_KIND["s3"])
+    if "rsync/scp to another host" in offsite:
+        checks.append("rsync/scp: " + CHECK_BY_KIND["ssh-server"])
+    for l in text.splitlines():
+        if re.search(r"\brclone\s+(?:--?\S+\s+)*sync\b", l) and "--backup-dir" not in l:
+            mirrors.append("rclone sync")
+        if re.search(r"\brsync\b[^\n]*\s--delete", l) and re.search(r"\s[\w.\-]*@?[\w.\-]+:[\w/~]", l) \
+                and not re.search(r"--backup\b|--link-dest", l):
+            mirrors.append("rsync --delete")
+        if re.search(r"\baws\s+s3\s+sync\b[^\n]*--delete", l):
+            mirrors.append("aws s3 sync --delete")
+    mirrors = sorted(set(mirrors))
+    seen = set()
+    checks = [c for c in checks if not (c in seen or seen.add(c))]
+    return ("yes" if reasons else "unknown"), reasons, checks, mirrors
+
+
 def last_status_line(log_text):
     for l in reversed(log_text.splitlines()):
         if STATUS_RX.search(l):
@@ -1655,9 +1736,11 @@ def backup_ladder(jobs, job_texts, job_scripts, ladder_files):
     alert = ALERT_RX.search(all_text) or CRON_MAILTO
     fresh = any(sched and age <= 2 and nontrivial for sched, age, nontrivial in ladder_files)
     exists = bool(jobs or ladder_files)
+    deletable, del_reasons, del_checks, mirrors = offsite_protection(all_text, used, remotes, offsite)
     ladder = {"exists": "yes" if exists else "no", "fresh": "yes" if fresh else "no",
               "offsite": ", ".join(offsite) if offsite else "no",
               "encrypted": ("yes" if encrypted else "no") if offsite else "n/a (no offsite copy)",
+              "deletable_from_host": deletable if offsite else "n/a (no offsite copy)",
               "alerts": "configured" if alert else "none seen", "restore_tested": "unknown (ask)"}
     emit("backup ladder (as far as the host shows): " + " · ".join("%s=%s" % kv for kv in ladder.items()))
     state("backups", "ladder", ladder)
@@ -1669,11 +1752,26 @@ def backup_ladder(jobs, job_texts, job_scripts, ladder_files):
     if not offsite:
         flag("backups", "backups exist only on this host: a disk failure, an unpaid renewal or ransomware takes "
              "the backups with the data")
-    elif remotes or offsite:
-        kinds = ", ".join(sorted({"%s (%s)" % (r["name"], r["type"]) for r in used})) or ", ".join(offsite)
-        flag("backups", "the credentials for the offsite backup live on this host (%s): whoever gets root here "
-             "can delete the offsite copies too — needs versioning/object lock, append-only, or a pull-based copy"
-             % kinds)
+    else:
+        for r in del_reasons:
+            emit("offsite deletable from this host: " + r)
+        for c in del_checks:
+            emit("offsite protection to check: " + c)
+        if deletable == "yes":
+            flag("backups", "the offsite backup can be deleted from this host: %s. Whoever gets root here (an "
+                 "attacker, ransomware, an agent following injected text) erases the backups with the data — keep "
+                 "a write-only key here and prune from another machine, or use object lock / an append-only "
+                 "repository / a pull-based copy" % "; ".join(del_reasons))
+        else:
+            kinds = ", ".join(sorted({"%s (%s)" % (r["name"], r["type"]) for r in used})) or ", ".join(offsite)
+            flag("backups", "the credentials for the offsite backup live on this host (%s); whether they can "
+                 "delete it is not visible from here — %s"
+                 % (kinds, "check: " + " | ".join(del_checks) if del_checks else
+                    "check the key's rights and the destination's versioning or append-only mode"))
+        if mirrors:
+            flag("backups", "%s mirrors deletions to the offsite copy: a file deleted or encrypted here (a bad rm, "
+                 "ransomware) is deleted or overwritten offsite at the next run, unless the destination keeps "
+                 "versions the host cannot purge — use copy, --backup-dir, or dated snapshots" % " and ".join(mirrors))
     if not alert:
         flag("backups", "backup failures alert nobody (no mail/webhook in the job, no MAILTO) — a broken backup "
              "stays silent")
@@ -1889,6 +1987,23 @@ def sec_processes():
 
 
 # ---------------------------------------------------------------- main
+# Facts one section reads from another: backups and processes look at the cron lines.
+NEEDS = {"backups": ["cron"], "processes": ["cron"]}
+
+
+def run_quietly(fn, name):
+    """Run a section only for the facts later sections read (--only backups still sees cron jobs):
+    its output, candidates and state are dropped, so the partial run reports only what was asked."""
+    n_out, n_flags = len(OUT), len(FLAGS)
+    try:
+        fn()
+    except Exception:
+        pass
+    del OUT[n_out:]
+    del FLAGS[n_flags:]
+    STATE.pop(name, None)
+
+
 SECTIONS = [sec_host, sec_network, sec_firewall, sec_docker, sec_ssh, sec_users, sec_services, sec_cron,
             sec_web, sec_tls, sec_files, sec_git, sec_backups, sec_disk, sec_hardening, sec_injection, sec_processes]
 
@@ -1912,9 +2027,12 @@ def main():
     os.makedirs(out_dir, mode=0o700, exist_ok=True)
 
     wanted = set(args.only.split(",")) if args.only else None
+    quiet = {d for w in (wanted or ()) for d in NEEDS.get(w, ())} - (wanted or set())
     for fn in SECTIONS:
         name = fn.__name__[4:]
         if wanted and name not in wanted:
+            if name in quiet:
+                run_quietly(fn, name)
             continue
         t = time.time()
         try:

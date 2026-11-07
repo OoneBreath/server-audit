@@ -40,6 +40,29 @@ mkdir -p /opt/shop
 printf 'DB_PASSWORD=%s\n' "$(python3 -c 'import secrets;print(secrets.token_urlsafe(18))')" > /opt/shop/.env
 chmod 644 /opt/shop/.env
 
+# nightly offsite copy: rclone crypt over Google Drive (fake token), mirrored with `rclone sync`
+mkdir -p /root/.config/rclone /var/backups/shop /var/log/shop
+cat > /root/.config/rclone/rclone.conf <<EOS
+[gdrive]
+type = drive
+scope = drive
+token = {"access_token":"$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))')","token_type":"Bearer"}
+
+[gcrypt]
+type = crypt
+remote = gdrive:server-backups
+password = $(python3 -c 'import secrets;print(secrets.token_urlsafe(18))')
+EOS
+chmod 600 /root/.config/rclone/rclone.conf
+cat > /usr/local/sbin/shop-offsite.sh <<'EOS'
+#!/bin/sh
+tar czf /var/backups/shop/shop-$(date +%F).tgz /opt/shop /srv/www
+rclone sync /var/backups/shop gcrypt:web-01 >> /var/log/shop/offsite.log 2>&1 && echo "$(date -Is) offsite OK" >> /var/log/shop/offsite.log
+EOS
+chmod 755 /usr/local/sbin/shop-offsite.sh
+echo '30 3 * * * root /usr/local/sbin/shop-offsite.sh' > /etc/cron.d/shop-offsite
+tar czf /var/backups/shop/shop-2026-11-01.tgz /srv/www 2>/dev/null
+
 # a SUID copy of find that no package owns
 cp /usr/bin/find /usr/local/bin/findx && chmod 4755 /usr/local/bin/findx
 dnf clean all >/dev/null

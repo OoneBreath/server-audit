@@ -63,10 +63,11 @@ Optional `findings.json` next to the report (mode 600, same leak check), for das
 tracking status across audits — one object per finding, no secret values, no fingerprints:
 
 ```json
-{"host": "<hostname>", "date": "YYYY-MM-DD", "skill_version": "0.3.0",
+{"host": "<hostname>", "date": "YYYY-MM-DD", "skill_version": "0.3.1",
  "findings": [{"id": 1, "title": "…", "severity": "HIGH", "confidence": "verified-outside",
                "area": "exposure", "status": "open", "path": "A"}],
- "backup_ladder": {"exists": true, "fresh": true, "offsite": false, "encrypted": null, "restore_tested": null}}
+ "backup_ladder": {"exists": true, "fresh": true, "offsite": false, "encrypted": null,
+                  "deletable_from_host": null, "restore_tested": null}}
 ```
 
 Chat summary (the reply to the operator, not the file): the top findings with severity in one line

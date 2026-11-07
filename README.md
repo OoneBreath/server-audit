@@ -13,7 +13,7 @@ tests, not by promises.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Runtime deps](https://img.shields.io/badge/runtime%20deps-zero-success)](#install)
 
-**v0.3.0** · Python 3 stdlib + bash · Ubuntu, Debian and the RHEL family · Caddy, nginx, Apache ·
+**v0.3.1** · Python 3 stdlib + bash · Ubuntu, Debian and the RHEL family · Caddy, nginx, Apache ·
 tested end to end on two deliberately broken lab servers in CI · used on production VPSs since
 November 2026 ([CHANGELOG](CHANGELOG.md)).
 
@@ -62,7 +62,7 @@ It is **not**:
 | Secrets | files, git history, shell history, agent transcripts and prompt history — where, how exposed, reused where; never the value |
 | Services & cron | root jobs running user-writable files, `Environment=` secrets readable through `systemctl show`, processes that die on reboot |
 | Docker | `--privileged`, Docker socket mounts, host network/PID, host paths mounted read-write, unpinned images, registry credentials, log rotation |
-| Backups | ladder: exists → fresh → offsite → encrypted → restore-tested; can root delete the offsite copies; do failures alert anyone; last status in the job's log |
+| Backups | ladder: exists → fresh → offsite → encrypted → safe from this host → restore-tested; can the key on the host delete the offsite copies, does the job mirror deletions offsite; do failures alert anyone; last status in the job's log |
 | Disk | filesystems and inodes near full, container logs without limits, journald |
 | Updates | pending security updates (apt, or dnf from its local cache), reboot required, unattended-upgrades / dnf-automatic, end of OS support |
 | TLS | expiry from local stores; versions, HSTS and certificates from outside |
@@ -182,7 +182,9 @@ What it catches that a quick look misses:
 - nginx server blocks and locations that serve content without auth, directory listings, plain-HTTP
   sites; firewalld zones with ports nothing listens on; hosts with no inbound filtering at all;
 - the backup ladder: offsite tool and rclone remote types (never their credentials), whether the
-  offsite credentials sit on this host, whether failures alert anyone, and the last status line in the
+  credentials on this host can delete the offsite copy (the job prunes, or the remote is a Drive-like
+  token) or what to check where it depends on the bucket, jobs that mirror deletions offsite
+  (`rclone sync`, `rsync --delete`), whether failures alert anyone, and the last status line in the
   job's log;
 - databases on public addresses, tunnels that skip the firewall, Docker containers that can take over
   the host, container logs without limits, disks filling up;

@@ -50,7 +50,9 @@ HISTORY = re.compile(r"(^|/)\.(bash|zsh|python|psql|mysql|node_repl|sqlite|redis
 COPY = re.compile(r"(?i)(\.bak|\.old|\.orig|\.save|~|\.\d{8}.*|backup|archive|\.swp)$|/backups?/|secret-archive|"
                   r"/file-history/|\.bak-")
 LOG = re.compile(r"(?i)(\.log(\.\d+)?$|/var/log/)")
-EXAMPLE = re.compile(r"(?i)(example|sample|template|\.dist$|\.tmpl$|(?:^|/)tests?/|(?:^|/)fixtures?/|(?:^|/)spec/)")
+EXAMPLE = re.compile(r"(?i)(example|sample|template|\.dist$|\.tmpl$|(?:^|/)tests?/|(?:^|/)fixtures?/|(?:^|/)spec/|"
+                     r"_test\.(?:go|py|rb|exs?)$|(?:^|/)test_[^/]*\.py$|\.(?:test|spec)\.[cm]?[jt]sx?$|_spec\.rb$|"
+                     r"Tests?\.(?:swift|kt|java|cs)$)")
 # prompt histories of AI agents: what the operator typed or pasted, sent to the model provider
 AGENT_HISTORY = re.compile(r"/\.(claude|codex|gemini|aider|cursor)[^/]*/(?:.*/)?history[^/]*\.jsonl?$|/\.aider\.chat\.history\.md$")
 
@@ -78,6 +80,7 @@ class Scanner:
         self.repos = []
         self.files = 0
         self.skipped_large = 0
+        self.public = set()  # fingerprints of public-by-design keys (counted, not listed)
 
     # -- git
     def repo_tracked(self, root):
@@ -190,6 +193,9 @@ class Scanner:
         return tags
 
     def add(self, tags, f, where, line, st=None):
+        if f["type"] == "public-key":
+            self.public.add(f["fp"])
+            return
         rec = {
             "tags": list(tags),
             "type": f["type"],
@@ -313,6 +319,9 @@ def main():
                   " (+history)" if args.git_history else "", s.skipped_large,
                   "root" if os.geteuid() == 0 else "NON-ROOT (unreadable files missed)"))
     out.append("hits: %d (examples/tests hidden: %d)" % (len(hits), len(s.hits) - len(hits)))
+    if s.public:
+        out.append("public-by-design keys seen (PostHog phc_, Stripe pk_, Mapbox pk.; not secrets, not listed): %d"
+                   % len(s.public))
     if skipped_hist:
         out.append("git history NOT scanned (no local commits — third-party clones; --all-history to include): "
                    + ", ".join(skipped_hist))

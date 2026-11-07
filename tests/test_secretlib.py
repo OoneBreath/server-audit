@@ -108,6 +108,49 @@ class MaskTests(unittest.TestCase):
         _, f = secretlib.scan_line('DB_PASSWORD = "Real1y-S3cret"', code=True)
         self.assertTrue(f)
 
+    def test_ordinary_code_is_not_a_secret(self):
+        # lines from a real open-source repo (v0.3.1): each was reported as a secret by v0.3.0
+        cases = [
+            ("r = await fetch('/api/v1' + path, { credentials: 'same-origin', headers, ...opts });", True),
+            ('"token_bucket":     "unknown",', True),
+            ('TOKEN_FILE="$PUB/.token"', False),
+            ('TOKEN=$(cat "$TOKEN_FILE")', False),
+            ("TOKEN=`cat /run/token`", False),
+            ('{"built_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","url":"$BASE/install.html"}', False),
+            ("lines.push((ok ? 'PASS' : 'FAIL') + ' ' + name);", False),
+            ('buckets = api(auth["apiUrl"] + "/b2api/v2/b2_list_buckets", token=auth["authorizationToken"],', False),
+            ("token_type: bearer", False),
+            ("SESSION_TOKEN_TTL=3600000", False),
+        ]
+        for line, code in cases:
+            with self.subTest(line=line):
+                self.assertEqual(secretlib.scan_line(line, code=code, lenient=True)[1], [], line)
+
+    def test_ordinary_code_rules_keep_real_values(self):
+        lenient = lambda line, code=False: secretlib.scan_line(line, code=code, lenient=True)[1]  # noqa: E731
+        self.assertTrue(lenient('TOKEN="$PREFIX-9f8e7d6c5b4a3f2e1d0c"'))   # a literal after the variable
+        self.assertTrue(lenient("ADMIN_PASSWORD=Unkn0wn-But-Real"))
+        self.assertTrue(lenient("curl -u deploy:S3cr3t-Value https://x.example"))
+        self.assertTrue(lenient("DB_PASSWORD_HINT=Real1y-S3cret"))         # only listed suffixes are metadata
+        self.assertTrue(lenient("VAULT_SECRET_ID=7d2f1c0e-real-secret-id"))  # AppRole secret_id is a credential
+        self.assertTrue(lenient("htpasswd: $argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHQ$aGFzaGhhc2hoYXNo"))
+        # masking stays strict: the same lines are still redacted in inventories
+        masked, _ = secretlib.scan_line('"token_bucket": "Real1y-S3cret-bucket"')
+        self.assertNotIn("Real1y-S3cret-bucket", masked)
+
+    def test_public_by_design_keys(self):
+        phc = "phc_" + "Ab1Cd2Ef3Gh4" * 4
+        _, f = secretlib.scan_line('DefaultToken = "%s"' % phc, code=True, lenient=True)
+        self.assertEqual([x["type"] for x in f], ["public-key"])
+        self.assertNotIn(phc, repr(f))
+        _, f = secretlib.scan_line("STRIPE_API_KEY=pk_live_" + "51Hx" * 6, lenient=True)
+        self.assertEqual([x["type"] for x in f], ["public-key"])
+        # a PostHog personal key (phx_) is a secret; masking still hides the public one
+        _, f = secretlib.scan_line("POSTHOG_TOKEN=phx_" + "Ab1Cd2Ef3Gh4" * 4, lenient=True)
+        self.assertEqual([x["type"] for x in f], ["assignment"])
+        masked, _ = secretlib.scan_line('usage_token = "%s"' % phc)
+        self.assertNotIn(phc, masked)
+
     def test_constant_named_after_itself(self):
         self.assertEqual(secretlib.scan_line('_API_V2_BEARER_TOKEN_KEY = "api_v2_bearer_token_key"', code=True)[1], [])
         self.assertEqual(secretlib.scan_line("APP_TOKEN = 'app-token'", code=True)[1], [])
