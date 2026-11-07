@@ -566,6 +566,12 @@ def sec_firewall():
 CONTAINERS = []
 
 
+def docker_status(status):
+    """(running, label) from the Status column of `docker ps -a` ("Up 3 days", "Exited (0) 9 months ago")."""
+    st = (status or "").strip()
+    return st.startswith(("Up", "Restarting")), st or "unknown"
+
+
 def sec_docker():
     header("DOCKER")
     docker_client_configs()  # registry credentials can sit in ~/.docker even where the engine is not installed
@@ -578,12 +584,14 @@ def sec_docker():
         return
     names = [l.split("\t")[0] for l in out.splitlines() if l.strip() and not l.startswith("(")]
     images = {}
+    status = {}
     for line in out.splitlines():
         cols = line.split("\t")
         if len(cols) < 4:
             continue
         name, ports = cols[0], cols[3]
         images[name] = cols[1]
+        status[name] = docker_status(cols[2])
         state("docker", "containers", sorted(set(STATE.get("docker", {}).get("containers", [])) |
                                              {"%s %s %s" % (name, cols[1], ports)}))
         for m in re.finditer(r"(0\.0\.0\.0|\[::\]|::):(\d+)(?:-\d+)?->(\d+)", ports):
@@ -594,29 +602,44 @@ def sec_docker():
            "|user={{.Config.User}}|capadd={{.HostConfig.CapAdd}}|restart={{.HostConfig.RestartPolicy.Name}}"
            "|mem={{.HostConfig.Memory}}|log={{.HostConfig.LogConfig.Type}}"
            "|logmax={{index .HostConfig.LogConfig.Config \"max-size\"}}"
+           "|bind={{range $p, $b := .HostConfig.PortBindings}}{{$p}}={{range $b}}{{.HostIp}}:{{.HostPort}},{{end}} {{end}}"
            "|mounts={{range .Mounts}}{{.Source}}:{{.Destination}}:{{if .RW}}rw{{else}}ro{{end}} {{end}}")
     if names:
-        no_mem, unbounded = [], []
+        no_mem, unbounded, stopped = [], [], []
         rc, ins = run(["docker", "inspect", "--format", fmt] + names[:80], timeout=60)
         emit("container details (no env vars shown — docker inspect shows env to anyone in the docker group):")
         for l in ins.splitlines():
             emit("  " + l)
             n = l.split("|")[0].lstrip("/")
+            running, st_label = status.get(n, (True, "?"))
+            # a stopped container is a risk only once started: say so instead of reporting it like a running one
+            who = "container %s" % n if running else "stopped container %s (%s; risk only when started)" % (n, st_label)
+            if not running:
+                stopped.append("%s (%s)" % (n, st_label))
+                bm = re.search(r"\|bind=([^|]*)", l)
+                for p, hp in re.findall(r"(\d+/\w+)=([^ ]*)", bm.group(1) if bm else ""):
+                    for b in hp.strip(",").split(","):
+                        hip, _, hport = b.rpartition(":")
+                        if hport and hip in ("", "0.0.0.0", "::") and hport not in ("80", "443"):
+                            flag("docker", "%s would publish host port %s on ALL interfaces (Docker bypasses ufw)"
+                                 % (who, hport))
             if "|priv=true|" in l:
-                flag("docker", "container %s runs --privileged (root on host if compromised)" % n)
+                flag("docker", "%s runs --privileged (root on host if compromised)" % who)
             if "docker.sock" in l:
-                flag("docker", "container %s mounts the Docker socket (= root on host)" % n)
+                flag("docker", "%s mounts the Docker socket (= root on host)" % who)
             if "|net=host|" in l:
                 emit("    note: %s uses host networking (its ports are host ports, not DNAT)" % n)
-            if "|restart=no|" in l or "|restart=|" in l:
+            if running and ("|restart=no|" in l or "|restart=|" in l):
                 emit("    note: %s has no restart policy — will not come back after reboot" % n)
             m = re.search(r"\|mounts=(.*)$", l)
             for mnt in (m.group(1).split() if m else []):
                 src, _, rest = mnt.partition(":")
                 dst, _, mode = rest.rpartition(":")
                 if sensitive_mount(src, mode):
-                    flag("docker", "container %s mounts host %s -> %s %s — a compromised container can %s the host"
-                         % (n, src, dst, mode, "modify" if mode == "rw" else "read all of"))
+                    flag("docker", "%s mounts host %s -> %s %s — a compromised container can %s the host"
+                         % (who, src, dst, mode, "modify" if mode == "rw" else "read all of"))
+            if not running:
+                continue  # memory limits and log growth matter only while it runs
             if "|mem=0|" in l:
                 no_mem.append(n)
             lm = re.search(r"\|log=([^|]*)\|logmax=([^|]*)", l)
@@ -626,10 +649,12 @@ def sec_docker():
         if unbounded and not dj_max:
             flag("docker", "%d container(s) log to json-file without max-size and daemon.json sets no default — "
                  "logs grow until the disk is full: %s" % (len(unbounded), ", ".join(unbounded[:12])))
+        if stopped:
+            emit("stopped containers (remove the ones nobody needs: docker rm): %s" % ", ".join(stopped[:20]))
         if no_mem:
             emit("note: %d container(s) without a memory limit (one runaway container can starve the host): %s"
                  % (len(no_mem), ", ".join(no_mem[:12])))
-        unpinned = sorted({img for img in images.values() if image_unpinned(img)})
+        unpinned = sorted({img for n, img in images.items() if image_unpinned(img) and status.get(n, (True,))[0]})
         if unpinned:
             rc, dig_out = run(["docker", "image", "inspect", "--format", "{{.RepoTags}}|{{.RepoDigests}}"]
                               + unpinned[:40], timeout=60)
@@ -1683,6 +1708,18 @@ def offsite_protection(all_text, used_remotes, all_remotes, offsite):
     return ("yes" if reasons else "unknown"), reasons, checks, mirrors
 
 
+# counters of zero are good news: "fail=0", "errors: 0", "0 failed"
+ZERO_COUNTER = re.compile(r"(?i)\b(?:fail(?:ed|ures?|s)?|errors?|partial|stale|warnings?)\s*[=:]\s*0\b|"
+                          r"\b0\s+(?:fail(?:ed|ures?|s)?|errors?|warnings?)\b")
+PROBLEM_RX = re.compile(r"(?i)\b(fail(?:ed|ure)?|error|errors|partial|stale)\b")
+
+
+def status_problem(line):
+    """True when a backup log's status line reports a problem (zero counters are not one)."""
+    rest = ZERO_COUNTER.sub(" ", line)
+    return bool(PROBLEM_RX.search(rest)) and not re.search(r"(?i)\bok\b", rest)
+
+
 def last_status_line(log_text):
     for l in reversed(log_text.splitlines()):
         if STATUS_RX.search(l):
@@ -1728,8 +1765,7 @@ def backup_ladder(jobs, job_texts, job_scripts, ladder_files):
         age = (time.time() - st.st_mtime) / 86400
         emit("backup log %s (written %.1f days ago), last status line: %s"
              % (lg, age, stable(line)[:160] if line else "(none)"))
-        if line and re.search(r"(?i)\b(fail(?:ed|ure)?|error|partial|stale)\b", line) \
-                and not re.search(r"(?i)\bok\b", line):
+        if line and status_problem(line):
             flag("backups", "last status line in %s reports a problem (%.1f days ago): %s"
                  % (lg, age, stable(line)[:120]))
 

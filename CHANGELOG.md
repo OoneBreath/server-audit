@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.2: fixes from a real audit
+
+Released 7 November 2026. Reported by an operator after a full audit of a production Ubuntu 22.04 host
+(1819 secret-scan hits, mostly noise).
+
+- **find_secrets on web apps**: translation and UI strings are no longer secrets (`"forgot_password":
+  "Forgot password?"`, `confirm_password`, `password_label: "Passwort"`, `token_expired: "Expired"`, any
+  text value with a space that names the secret itself, like "Your password"). A real value under the same
+  keys (`NEW_PASSWORD=Xk29-…`) is still found.
+- **Prose files** (`.md`, `.txt`, `.rst`, `.adoc`): `key = value` counts only at the start of a line or a
+  list item, so a sentence such as "the guessed password = root" is not a leak.
+- **The skill's own outputs** (`~/.server-audit/`) are skipped while walking directories: they are masked
+  and already leak-checked. Naming a file explicitly still scans it, so the check before a report leaves
+  the host works as before.
+- **Backup status lines**: zero counters (`fail=0`, `errors: 0`, `0 failed`) are success, not a problem.
+- **Stopped containers** are reported as stopped ("stopped container X (Exited (0) 9 months ago; risk only
+  when started)"), with the ports they would publish on all interfaces when started. They no longer count
+  for memory limits, log growth or unpinned images, and the inventory lists them for clean-up.
+
 ## 0.3.1: backups that survive the host, fewer false alarms
 
 Released 7 November 2026.

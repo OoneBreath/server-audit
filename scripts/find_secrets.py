@@ -37,6 +37,8 @@ import secretlib  # noqa: E402
 DEFAULT_PATHS = ["/etc", "/opt", "/srv", "/var/www", "/home", "/root", "/usr/local/etc", "/var/backups"]
 PRUNE = {"node_modules", ".git", "venv", ".venv", "site-packages", "dist-packages", "__pycache__", ".cache",
          "vendor", "third_party", "third-party", "bower_components", ".skill-airlock", "Pods",
+         # this skill's own outputs (masked, fingerprints only): scanned when named explicitly, not while walking
+         ".server-audit",
          "lang", "langs", "locales", "i18n", "l10n", "translations",
          ".npm", ".next", "dist", "build", "target", ".cargo", ".rustup", ".nvm", "go", ".pyenv",
          "share", "locale", "man", "doc", "fonts", "icons"}
@@ -153,6 +155,7 @@ class Scanner:
         text = data.decode("utf-8", "replace")
         tags = self.exposure(path, st, is_transcript)
         code = secretlib.is_code_path(path)
+        prose = secretlib.is_prose_path(path)
         in_key = False
         per_file = 0
         for i, line in enumerate(text.splitlines(), 1):
@@ -162,7 +165,7 @@ class Scanner:
                 continue
             if len(line) > 20000:
                 line = line[:20000]
-            _, found = secretlib.scan_line(line, code=code, lenient=True)
+            _, found = secretlib.scan_line(line, code=code, lenient=True, prose=prose)
             if secretlib.PEM_HEADER.match(line):
                 in_key = True
             for f in found:
@@ -261,7 +264,8 @@ class Scanner:
                 elif line.startswith("+++ "):
                     fname = line[6:] if line.startswith("+++ b/") else line[4:]
                 elif line.startswith("+") and not line.startswith("+++"):
-                    _, found = secretlib.scan_line(line[1:2000], code=secretlib.is_code_path(fname), lenient=True)
+                    _, found = secretlib.scan_line(line[1:2000], code=secretlib.is_code_path(fname), lenient=True,
+                                                   prose=secretlib.is_prose_path(fname))
                     for f in found:
                         k = (f["fp"], fname)
                         if k in seen:

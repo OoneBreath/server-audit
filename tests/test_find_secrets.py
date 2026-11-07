@@ -119,5 +119,25 @@ class FindSecretsTest(unittest.TestCase):
         self.assertIn("PANEL_PASSWORD", self.out.split("values found in more than one place")[1])
 
 
+
+class OwnOutputsAndProse(unittest.TestCase):
+    def test_own_reports_skipped_while_walking_but_scanned_when_named(self):
+        root = tempfile.mkdtemp(prefix="sa-own-")
+        try:
+            run = os.path.join(root, ".server-audit", "host-20261107")
+            os.makedirs(run)
+            report = os.path.join(run, "report.md")
+            with open(report, "w") as f:
+                f.write("- SSH brute force: the guessed password = root never worked\n"
+                        "DB_PASSWORD=Real1y-S3cret-v4lue-leaked\n")
+            walked = subprocess.run([sys.executable, "-I", SCRIPT, root], stdout=subprocess.PIPE, text=True).stdout
+            self.assertIn("hits: 0", walked)
+            named = subprocess.run([sys.executable, "-I", SCRIPT, report], stdout=subprocess.PIPE, text=True).stdout
+            self.assertIn("hits: 1", named)  # the leak check before a report leaves the host still works
+            self.assertIn("key=DB_PASSWORD", named)
+            self.assertNotIn("Real1y-S3cret", named)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 if __name__ == "__main__":
     unittest.main()

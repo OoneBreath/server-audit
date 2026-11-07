@@ -155,6 +155,28 @@ META_KEY = re.compile(r"(?i)[_\-.](?:file|path|dir|url|uri|endpoint|expires?|exp
 # keys that are public by design (shipped in web pages and apps): PostHog project keys, Stripe publishable
 # keys, Mapbox public tokens. Reported as public-key so the scan can count them apart from secrets.
 PUBLIC_KEY = re.compile(r"^(?:phc_[A-Za-z0-9]{30,}|pk_(?:live|test)_[A-Za-z0-9]{16,}|pk\.eyJ[A-Za-z0-9_\-.]{20,})$")
+# translation and UI keys: forgot_password, confirm_password, password_label, token_expired
+UI_KEY = re.compile(r"(?i)(?:^|[_\-.])(?:forgot|reset|change|confirm|confirmation|new|old|current|repeat|retype|enter|"
+                    r"invalid|wrong|incorrect|weak|strong|mismatch|required|label|hint|placeholder|title|text|message|"
+                    r"msg|errors?|help|tooltip|button|btn|prompt|desc|description|show|hide|toggle|link|lost|strength|"
+                    r"policy|rules|expired|sent|changed|updated|success|failed|subject|heading|caption|notice|"
+                    r"warning)(?:$|[_\-.])")
+# the value names the thing itself ("Your password", "Hasło jest za krótkie"): UI text, not a credential
+SECRET_WORD = re.compile(r"(?i)\b(?:pass(?:word|wort|wd)?|has(?:ł|l)\w*|contrase\w*|senha|wachtwoord|"
+                         r"mot de passe|token|secret|key|klucz\w*)\b")
+# prose files: an assignment counts only when the key starts the line (a config line, a list item)
+PROSE_PREFIX = re.compile(r"^\s*(?:[-*+>]\s+|\d+[.)]\s+)?(?:export\s+)?[\"'`]?$")
+
+
+def _ui_text(key, val):
+    """True for UI strings: a UI-ish key with text, or any text value that names the secret itself."""
+    texty = bool(re.search(r"\s", val)) or val.rstrip().endswith(("?", ".", "!", ":", "…")) or (
+        val.isalpha() and val[:1].isupper() and len(val) <= 30)
+    if UI_KEY.search(key) and texty:
+        return True
+    return bool(re.search(r"\s", val)) and bool(SECRET_WORD.search(val))
+
+
 # a call or an index on a name: token=auth["authorizationToken"] (the quote ends the captured value)
 CODE_INDEX = re.compile(r"^[A-Za-z_][\w.]*[\[(]$")
 
@@ -183,10 +205,18 @@ def is_code_path(path: str) -> bool:
     return path.lower().endswith(CODE_EXT)
 
 
-def scan_line(line: str, code: bool = False, lenient: bool = False):
+PROSE_EXT = (".md", ".markdown", ".rst", ".adoc", ".txt")
+
+
+def is_prose_path(path: str) -> bool:
+    return path.lower().endswith(PROSE_EXT)
+
+
+def scan_line(line: str, code: bool = False, lenient: bool = False, prose: bool = False):
     """Return (masked_line, findings). Findings never contain the value itself.
     code=True (source files): only quoted string literals count as assigned secrets.
     lenient=True (detection only, never for masking output): prose after a colon is not a value.
+    prose=True (with lenient; .md/.txt/.rst files): key=value counts only at the start of a line.
     Masking must stay strict: over-redacting prose is harmless, under-redacting is a leak."""
     findings = []
     masked = line
@@ -244,7 +274,9 @@ def scan_line(line: str, code: bool = False, lenient: bool = False):
         # UI strings ("password_reset": "Reset your password") — several words are text, not a credential
         if lenient and len(val.split()) >= 3:
             return m.group(0)
-        if lenient and _ordinary_code(m, key, val):
+        if lenient and (_ordinary_code(m, key, val) or _ui_text(key, val)):
+            return m.group(0)
+        if lenient and prose and not PROSE_PREFIX.match(m.string[:m.start("key")]):
             return m.group(0)
         if lenient and PUBLIC_KEY.match(val):
             findings.append(_finding("public-key", val, key=key))

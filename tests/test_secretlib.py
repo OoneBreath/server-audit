@@ -138,6 +138,35 @@ class MaskTests(unittest.TestCase):
         masked, _ = secretlib.scan_line('"token_bucket": "Real1y-S3cret-bucket"')
         self.assertNotIn("Real1y-S3cret-bucket", masked)
 
+    def test_ui_strings_are_not_secrets(self):
+        # translation and UI keys in app bundles (reported from a real audit: most of 1819 hits)
+        cases = [('"forgot_password": "Forgot password?",', False),
+                 ("forgot_password: 'Zapomniałeś hasła?',", True),
+                 ('"confirm_password": "Confirm password",', False),
+                 ('"new_password": "Nowe hasło",', False),
+                 ('"invalid_password": "Invalid password.",', False),
+                 ('"password_label": "Passwort",', False),
+                 ('"token_expired": "Expired",', False),
+                 ('"password": "Your password",', False)]
+        for line, code in cases:
+            with self.subTest(line=line):
+                self.assertEqual(secretlib.scan_line(line, code=code, lenient=True)[1], [], line)
+        lenient = lambda line: secretlib.scan_line(line, lenient=True)[1]  # noqa: E731
+        self.assertTrue(lenient("NEW_PASSWORD=Xk29-lq0P-7Hd"))
+        self.assertTrue(lenient('"reset_token": "9f8e7d6c5b4a3f2e1d0c"'))
+        self.assertTrue(lenient('"confirm_password": "Xk29-lq0P-7Hd"'))
+        masked, _ = secretlib.scan_line('"forgot_password": "Forgot password?"')
+        self.assertNotIn("Forgot password?", masked)  # masking stays strict
+
+    def test_prose_files_need_the_key_at_line_start(self):
+        prose = lambda line: secretlib.scan_line(line, lenient=True, prose=True)[1]  # noqa: E731
+        self.assertEqual(prose("- the SSH brute force guessed password = root, then gave up"), [])
+        self.assertEqual(prose("Rotate it: the old token = 5f2b9c… is in the transcript"), [])
+        self.assertTrue(prose("DB_PASSWORD=Real1y-S3cret-v4lue"))
+        self.assertTrue(prose("  - password: Real1y-S3cret-v4lue"))
+        self.assertTrue(prose("export API_TOKEN=Real1y-S3cret-v4lue"))
+        self.assertTrue(secretlib.scan_line("the guessed password = Real1y-S3cret-v4lue", lenient=True)[1])
+
     def test_public_by_design_keys(self):
         phc = "phc_" + "Ab1Cd2Ef3Gh4" * 4
         _, f = secretlib.scan_line('DefaultToken = "%s"' % phc, code=True, lenient=True)
