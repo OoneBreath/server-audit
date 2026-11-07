@@ -33,7 +33,20 @@ server {
     server_name grafana.example.com;
     location / { proxy_pass http://127.0.0.1:3000; }
 }
+# a PHP webmail that protects its internal directories with .htaccess only (nginx never reads it)
+server {
+    listen 80;
+    server_name webmail.example.com;
+    root /srv/webmail;
+    index index.php;
+    location ~ \.php$ { fastcgi_pass 127.0.0.1:9000; }
+}
 EOS
+mkdir -p /srv/webmail/config /srv/webmail/logs /srv/webmail/skins
+echo '<?php echo "webmail";' > /srv/webmail/index.php
+echo 'Require all denied' > /srv/webmail/config/.htaccess
+printf 'Order deny,allow\nDeny from all\n' > /srv/webmail/logs/.htaccess
+echo 'Options -Indexes' > /srv/webmail/skins/.htaccess
 
 # app secrets readable by everyone (fake)
 mkdir -p /opt/shop

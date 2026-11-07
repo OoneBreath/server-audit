@@ -171,7 +171,9 @@ if [ -n "$URLS" ]; then
   bad=0
   while read -r url expect _; do
     [[ -z "${url:-}" || "$url" == \#* ]] && continue
-    code="$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$url")"
+    resp="$(curl -s -m 10 -o /dev/null -D - -w '\n%{http_code}' "$url" 2>/dev/null | tr -d '\r')"
+    code="${resp##*$'\n'}"
+    cache="$(printf '%s\n' "$resp" | grep -i -E '^(cf-cache-status|x-cache|x-cache-status|age):' | tr '\n' ' ')"
     ok=0
     IFS='|' read -ra EXP <<< "${expect:-401}"
     for e in "${EXP[@]}"; do
@@ -180,6 +182,21 @@ if [ -n "$URLS" ]; then
     done
     if [ $ok = 1 ]; then echo "  ok        $code  $url"
     else echo "  !! MISMATCH got $code expected $expect  $url"; bad=$((bad+1)); fi
+    # A CDN can keep serving an old answer after a fix (or hide a broken one): ask the origin too.
+    host="$(printf '%s' "$url" | sed -E 's#^[A-Za-z]+://([^/:?]+).*#\1#')"
+    origin=""
+    if [[ "$url" == https://* && ",$CDN," == *",$host,"* ]]; then
+      origin="$(curl -sk -m 10 -o /dev/null -w '%{http_code}' --resolve "$host:443:$IP" "$url")"
+    fi
+    hit=0
+    printf '%s' "$cache" | grep -q -i -E '(cache(-status)?: *(hit|stale|updating|revalidated))|(age: *[1-9])' && hit=1
+    if [ -n "$origin" ] && [ "$origin" != "$code" ]; then
+      from=""; [ $hit = 1 ] && from=" from its cache (${cache% })"
+      echo "     ^ the origin answers $origin, the CDN $code$from — purge the CDN cache for this URL, then re-run"
+    elif [ $hit = 1 ]; then
+      echo "     ^ answered from a cache (${cache% }): the origin was not asked — check it directly" \
+           "(curl --resolve $host:443:ORIGIN-IP), purge the cache after a fix, re-run"
+    fi
     sleep "$DELAY"
   done < "$URLS"
   echo "  mismatches: $bad"

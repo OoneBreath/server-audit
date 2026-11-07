@@ -24,16 +24,31 @@ SECURITY_RELEVANT = {"network", "firewall", "docker", "ssh", "users", "services"
                      "files", "candidates"}
 
 
+FP = re.compile(r" fp=[0-9a-f]+")
+
+
 def _norm_candidate(text):
     # candidate texts carry counts and ages ("12 security updates", "3.0 days old"): compare without them
     return re.sub(r"\d+(?:\.\d+)?", "#", text)
+
+
+def _unfp(obj):
+    """Drop per-run secret fingerprints (state files written before 0.4.2 kept them in candidate texts,
+    so a secret in process arguments looked removed and re-added on every run)."""
+    if isinstance(obj, str):
+        return FP.sub("", obj)
+    if isinstance(obj, list):
+        return [_unfp(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _unfp(v) for k, v in obj.items()}
+    return obj
 
 
 def load(path):
     if os.path.isdir(path):
         path = os.path.join(path, "state.json")
     with open(path) as f:
-        return json.load(f)
+        return _unfp(json.load(f))
 
 
 def diff(old, new):
@@ -42,6 +57,7 @@ def diff(old, new):
     Only sections present in both states are compared (a run with --only has fewer sections).
     """
     out = []
+    old, new = _unfp(old), _unfp(new)
     for section in sorted(set(old) & set(new)):
         if section.startswith("_"):
             continue

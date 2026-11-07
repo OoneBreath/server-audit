@@ -128,3 +128,20 @@ http:
 EOS
 chmod 644 /etc/traefik/dynamic/routers.yml
 apt-get clean; rm -rf /var/lib/apt/lists/*
+
+# a stand-in for a CDN edge that still serves a cached 200 for a path the origin now protects
+mkdir -p /srv/cdn
+cat > /srv/cdn/edge.py <<'EOS'
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("CF-Cache-Status", "HIT")
+        self.send_header("Age", "120")
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"ok")
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("0.0.0.0", 8082), H).serve_forever()
+EOS

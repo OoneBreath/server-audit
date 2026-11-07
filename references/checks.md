@@ -100,6 +100,20 @@ outside-in URL matrix.
   for the bare IP and unknown hostnames.
 - **Apache**: `Options Indexes` (listing) and `/server-status`/`/server-info` without `Require local`
   (leaks every client IP and URL being served): MEDIUM.
+- **Caddy path patterns with a `*` inside** (`/a/*/b/*`, `/api/*/admin`): Caddy treats them as a glob in
+  which every `*` matches exactly one path segment — `/a/*/b/*` matches `/a/x/b/y` but not `/a/x/b/y/z`, and
+  the trailing `*` is not a prefix match there (checked on Caddy 2.11). A quick test with a shallow path
+  passes while deeper paths skip the auth. Flagged when the pattern also ends in `*`; `/items/*/verify`
+  (one id segment, the usual REST route) is a note. Verify: does the app route anything deeper under that
+  prefix (FastAPI `{id}` is one segment, `{id:path}` is not)? Fix with `path_regexp`, see remediation.md.
+- **`.htaccess` under Caddy or nginx** (flagged in WEB): only Apache reads `.htaccess`. PHP apps that
+  protect `config/`, `logs/`, `temp/`, `vendor/` with `Deny from all` / `Require all denied` /
+  `RedirectMatch 403` (webmail clients, CMSs, Composer packages) have those directories served as plain
+  files under Caddy or nginx. The candidate lists the guarded directories the proxy config does not mention
+  (one it names is a note: it probably blocks it). Verify each with `curl -s -o /dev/null -w '%{http_code}'
+  -H 'Host: NAME' http://127.0.0.1/config/config.inc.php` (and outside-in). Served config with DB
+  credentials or logs with sessions = HIGH; a served `vendor/` = MEDIUM (tests and dev tools inside
+  Composer packages have been remote-code-execution paths).
 - Data endpoints returning MRR, licence keys, user lists, logs, internal notes, or bulk lists to an
   anonymous caller are **HIGH**, even when "no one knows the URL" — crawlers, the app's own
   frontend JavaScript and sitemaps reveal URLs.
@@ -413,7 +427,10 @@ selectors the mail server uses but `dns_check.py` does not guess (pass `--dkim-s
 
 ## 15. Drift and attack paths
 
-**Drift** (top of the inventory, from `state.json` of the previous run): every added account, key,
+**Drift** (top of the inventory, from `state.json` of the previous run): secrets are compared by key name
+and length only — the per-run fingerprints are stripped, so a secret that stays in process arguments is
+not "removed and added" on every run (a rotated value of the same length does not show as a change).
+Every added account, key,
 listener, sudo rule, cron line, container, ufw rule or sshd setting since the last audit. Expected changes
 (the fixes just applied, a deployment the operator mentions) confirm the fix; anything unexplained is a
 finding — ask who made it. A new authorized key or UID-0 account nobody recognises = HIGH (possible

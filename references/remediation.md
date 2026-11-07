@@ -88,6 +88,22 @@ session kept open.
   rewritten by Docker's MASQUERADE to the host's public IP, so the proxy sees the host, not a stranger. Either
   leave the host's own IP out of the allow list (then a self-request through `--resolve name:443:<public-ip>`
   is a valid "foreign" test) or test from another machine.
+- **Caddy `path` wildcards**: `*` is a prefix match only at the end of a pattern without other wildcards
+  (`/admin/*`), a suffix match at the start (`*.php`), a substring match at both ends (`*/secret/*`). A `*`
+  inside the pattern makes the whole pattern a glob where every `*` matches one path segment: `/a/*/b/*`
+  protects `/a/x/b/y` but not `/a/x/b/y/z`. For "everything under `/a/<anything>/b/`" use
+  `path_regexp ^/a/[^/]+/b/` and test a deep path (`/a/x/b/y/z`) as well as a shallow one.
+- **A CDN in front can fake the result of a fix.** Cloudflare (and other CDNs) keep cached answers: after
+  closing a path the public hostname may still return the old 200, and a broken fix can look fine because
+  the edge serves an old 403/404. Verify at the origin first (`curl -sk --resolve NAME:443:ORIGIN_IP
+  https://NAME/path`), then purge the CDN cache for those URLs, then re-check through the public hostname.
+  `probe_external.sh` prints a cache note when a response carries `cf-cache-status: HIT` (or `x-cache: HIT`,
+  `age`), and asks the origin directly for hostnames given with `--cdn`. Private paths should also send
+  `Cache-Control: private, no-store` so the CDN never caches them.
+- **PHP apps under Caddy or nginx**: their `.htaccess` files are ignored. Block the directories in the proxy
+  instead — Caddy: `@internal path /config/* /logs/* /temp/* /vendor/*` + `handle @internal { respond 404 }`
+  first in the site (or `path_regexp`); nginx: `location ~ ^/(config|logs|temp|vendor)/ { deny all; }` — then
+  curl a file inside each (a 404/403 for a file you know exists, not only for the directory).
 - CDN origin bypass: if the origin uses a static origin certificate, restrict 80/443 to the CDN's
   published ranges; if it obtains certificates with ACME HTTP-01 on :80, restricting :80 breaks
   renewal — use authenticated origin pulls (mTLS between CDN and origin) or DNS-01 instead.

@@ -63,9 +63,17 @@ def flag(section, text):
     emit("!! " + text)
 
 
+FP_RE = re.compile(r" fp=[0-9a-f]+")
+
+
+def unfp(text):
+    """Already-masked text without the per-run fingerprints (drift compares it between runs)."""
+    return FP_RE.sub("", text)
+
+
 def stable(text):
     """Masked text without the per-run fingerprint, so it compares equal across runs."""
-    return re.sub(r" fp=[0-9a-f]+", "", secretlib.mask(text))
+    return unfp(secretlib.mask(text))
 
 
 def state(section, key, value):
@@ -1311,6 +1319,13 @@ def _ngx_protected(block, inherited):
     return inherited
 
 
+def _ngx_walk(block):
+    for n in block:
+        yield n
+        if n[2]:
+            yield from _ngx_walk(n[2])
+
+
 def nginx_servers(tree):
     """[{file, names, listen, ssl, default, redirect_https, protected, autoindex, root, locations:[...]}]"""
     http_prot = None
@@ -1330,6 +1345,7 @@ def nginx_servers(tree):
                 "autoindex": any(n[0] == "autoindex" and n[1] == ["on"] for n in body),
                 "content": any(n[0] in ("root", "proxy_pass", "fastcgi_pass", "uwsgi_pass", "grpc_pass", "alias")
                                for n in body),
+                "roots": sorted({x[1][0] for x in _ngx_walk(body) if x[0] == "root" and x[1]}),
                 "locations": []}
 
         def locs(block, prot, prefix=""):
@@ -1412,6 +1428,7 @@ def nginx_report(text):
     if servers and not tokens_off:
         emit("  note: server_tokens is not off (nginx version in headers and error pages) — LOW")
     state("web", "nginx_sites", sites)
+    return servers
 
 
 def apache_report():
@@ -1918,6 +1935,7 @@ def sec_haproxy():
 
 def sec_web():
     header("WEB / REVERSE PROXY")
+    WEB_ROOTS.clear()
     if have("caddy"):
         rc, v = run(["caddy", "version"])
         emit("caddy " + v.strip())
@@ -1938,10 +1956,13 @@ def sec_web():
             if stat.S_IMODE(st.st_mode) & 0o004 and re.search(r"basic_?auth", b):
                 emit("note: %s is world-readable and contains basic-auth hashes" % f)
             depth = 0
-            site = None
+            site = block = None
             per_site = {}
+            lines = []  # (site or "(snippet)", directive line) inside blocks
             for l in b.splitlines():
                 s = l.strip()
+                if depth == 0 and s.endswith("{") and not s.startswith("#"):
+                    block = s[:-1].strip() or "(global options)"
                 if depth == 0 and s.endswith("{") and not s.startswith(("(", "#")):
                     site = s[:-1].strip() or "(global options)"
                     per_site[site] = {"auth": 0, "reverse_proxy": []}
@@ -1949,9 +1970,14 @@ def sec_web():
                     per_site[site]["auth"] += 1
                 if site and s.startswith("reverse_proxy"):
                     per_site[site]["reverse_proxy"] += re.findall(r"(?:https?://)?[\w.\-\[\]:]*:\d+", s)
+                if block and depth > 0 and s and not s.startswith("#"):
+                    lines.append((block, s))
                 depth += s.count("{") - s.count("}")
                 if depth == 0:
-                    site = None
+                    site = block = None
+            caddy_wildcard_report(lines)
+            for site_, root in caddy_roots(lines):
+                WEB_ROOTS.append(("Caddy", site_, root, " ".join(x for k, x in lines if k == site_)))
             state("web", "caddy_sites " + f, [x for x in per_site if x != "(global options)"])
             for site in per_site:
                 for a in re.split(r"[\s,]+", site):
@@ -1969,10 +1995,13 @@ def sec_web():
     if have("nginx"):
         rc, ngx = run(["nginx", "-T"], timeout=60)
         if rc == 0:
-            nginx_report(ngx)
+            for sv in nginx_report(ngx):
+                denied = " ".join(l["path"] for l in sv["locations"] if l["protected"] == "deny")
+                WEB_ROOTS.extend(("nginx", " ".join(sv["names"]), r, denied) for r in sv["roots"])
         emit("  (full masked nginx -T below)")
         for l in ngx.splitlines()[:600]:
             emit("    " + l)
+    htaccess_report()
     apache_report()
     sec_traefik()
     sec_haproxy()
@@ -1992,6 +2021,114 @@ def sec_web():
             dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
     if not found:
         emit("  none")
+
+
+WEB_ROOTS = []  # (server, site, document root, config text that may already block paths) for the .htaccess check
+HTACCESS_DENY = re.compile(r"(?im)^\s*(?:deny\s+from\s+all|require\s+all\s+denied|"
+                           r"redirectmatch\s+(?:403|404|gone)\b|rewriterule\s+\S+\s+-\s+\[[^\]]*\bF\b)")
+
+
+def caddy_mid_wildcards(lines):
+    """[(block, pattern)] for Caddy path patterns with a * inside. Caddy matches those as a glob in which
+    every * stops at "/": /a/*/b/* matches /a/x/b/y but not /a/x/b/y/z (checked on Caddy 2.11)."""
+    out = []
+    for blk, s in lines:
+        t = s.split()
+        if len(t) > 2 and t[0].startswith("@") and t[1] == "path":
+            pats = t[2:]
+        elif t[0] == "path":
+            pats = t[1:]
+        elif len(t) > 2 and t[0] == "not" and t[1] == "path":
+            pats = t[2:]
+        elif len(t) > 1 and t[1].startswith("/") and not t[0].startswith("@"):
+            pats = t[1:2]  # inline matcher: `basic_auth /a/*/b/* {`, `respond /x/*/y 403`
+        else:
+            continue
+        for p in pats:
+            p = p.strip("\"'")
+            if p.startswith(("/", "*")) and "*" in p.strip("*") and (blk, p) not in out:
+                out.append((blk, p))
+    return out
+
+
+def caddy_wildcard_report(lines):
+    """/a/*/b/* looks like "everything under /a/<x>/b/" but is a glob: deeper paths are not matched (a real
+    audit found an auth rule that silently missed them). /items/*/verify is the usual REST shape (one id
+    segment) and only gets a note."""
+    for blk, pat in caddy_mid_wildcards(lines):
+        hit, miss = wildcard_examples(pat)
+        text = ("Caddy %s: path pattern %s — with a * inside, every * matches exactly one path segment (%s "
+                "matches, %s does not)" % (blk, pat, hit, miss))
+        if pat.endswith("*"):
+            flag("web", text + "; the trailing * is not a prefix match here: if it guards auth or blocks "
+                 "access, deeper paths slip past — use path_regexp")
+        else:
+            emit("  note: " + text + " — fine for /items/{id}/action routes when the app takes the id as one "
+                 "segment")
+
+
+def wildcard_examples(pat):
+    hit = pat.replace("*", "x")
+    miss = hit + "/y" if pat.endswith("*") else pat.replace("*", "x/y", 1).replace("*", "x")
+    return hit, miss
+
+
+def caddy_roots(lines):
+    """[(site, root)] for Caddy sites that serve files (file_server or php_fastcgi) from a document root."""
+    roots, serving = {}, set()
+    for blk, s in lines:
+        t = s.split()
+        if t[0] == "root" and len(t) > 1 and t[-1].startswith("/"):
+            roots.setdefault(blk, t[-1])
+        if t[0] in ("file_server", "php_fastcgi"):
+            serving.add(blk)
+    return [(b, r) for b, r in roots.items() if b in serving and not b.startswith("(")]
+
+
+def htaccess_guards(root, max_depth=4, max_dirs=5000):
+    """Directories under a document root whose .htaccess denies access ("." = rules in the root's own
+    .htaccess). Only Apache reads .htaccess; Caddy and nginx serve these directories unless their own
+    config blocks them. Does not descend below a guarded directory."""
+    root = root.rstrip("/")
+    if not root or not os.path.isdir(root):
+        return []
+    found, seen = [], 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        seen += 1
+        if seen > max_dirs:
+            break
+        dirnames[:] = sorted(d for d in dirnames if d not in PRUNE_DIRS)
+        if dirpath.count("/") - root.count("/") >= max_depth:
+            dirnames[:] = []
+        if ".htaccess" in filenames and HTACCESS_DENY.search(read(os.path.join(dirpath, ".htaccess"), 50_000) or ""):
+            found.append(os.path.relpath(dirpath, root))
+            if dirpath != root:
+                dirnames[:] = []
+    return found
+
+
+def htaccess_report():
+    """Caddy and nginx ignore .htaccess: directories a PHP app protects only there are served."""
+    done = set()
+    for server, site, root, conf in WEB_ROOTS:
+        if (server, root) in done:
+            continue
+        done.add((server, root))
+        guarded = htaccess_guards(root)
+        if not guarded:
+            continue
+        open_ = [d for d in guarded if d == "." or not re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(
+            os.path.basename(d)), conf)]
+        names = ", ".join("/" if d == "." else "/" + d + "/" for d in (open_ or guarded)[:5]) + \
+            (" …" if len(open_ or guarded) > 5 else "")
+        if not open_:
+            emit("  note: %s %s: %s rely on .htaccess, which %s ignores; the %s config names them, so it "
+                 "probably blocks them — check with curl" % (server, site, names, server, server))
+            continue
+        flag("web", "%s %s serves %s, but %s ignores .htaccess: %s %s protected only there (%s) — check each "
+             "answers 403/404 (curl -s -o /dev/null -w '%%{http_code}' -H 'Host: NAME' http://127.0.0.1/PATH)"
+             % (server, site, root, server, len(open_), "is" if len(open_) == 1 else "are",
+                ("the root .htaccess rules" if open_ == ["."] else names)))
 
 
 def name_served(cn, served):
@@ -2823,7 +2960,7 @@ def main():
             emit("(section %s failed: %s: %s)" % (name, type(e).__name__, e))
         emit("(section %s took %.1fs)" % (name, time.time() - t))
 
-    state("candidates", "all", FLAGS)
+    state("candidates", "all", [unfp(fl) for fl in FLAGS])  # same secret, new run: no drift
     STATE["_meta"] = {"run": os.path.basename(out_dir), "host": socket.gethostname(), "root": IS_ROOT,
                       "collected": datetime.datetime.now(timezone.utc).replace(tzinfo=None).isoformat(" ", "seconds"),
                       "sections": sorted(wanted) if wanted else "all", "schema": 1}

@@ -154,7 +154,8 @@ class UbuntuLab(Lab, unittest.TestCase):
     def run_probe(cls):
         urls = os.path.join(cls.out, "urls.txt")
         with open(urls, "w") as f:
-            f.write("http://%s:8080/ 2xx\nhttp://%s:8080/.env 401|403\n" % (cls.ip, cls.ip))
+            f.write("http://%s:8080/ 2xx\nhttp://%s:8080/.env 401|403\nhttp://%s:8082/admin/ 401|403\n"
+                    % (cls.ip, cls.ip, cls.ip))
         return sh("bash", os.path.join(REPO, "scripts", "probe_external.sh"), cls.ip, "--ports", "22,6379,8080",
                   "--delay", "0", "--urls", urls)
 
@@ -219,6 +220,9 @@ class UbuntuLab(Lab, unittest.TestCase):
         self.assertRegex(self.probe, r"6379 open")
         self.assertIn("SSH offers password", self.probe)
         self.assertIn("MISMATCH got 200 expected 401|403  http://%s:8080/.env" % self.ip, self.probe)
+        self.assertIn("MISMATCH got 200 expected 401|403  http://%s:8082/admin/" % self.ip, self.probe)
+        self.assertIn("^ answered from a cache (CF-Cache-Status: HIT Age: 120)", self.probe)
+        self.assertNotIn("from a cache", self.probe.split("8082/admin/")[0])  # the plain app is not a cache
 
 
 @unittest.skipUnless(ENABLED, "set SERVER_AUDIT_E2E=1 (needs Docker)")
@@ -238,6 +242,8 @@ class RhelLab(Lab, unittest.TestCase):
         self.assert_candidates([
             "PermitRootLogin yes",
             "nginx shop.example.com: location /admin/ serves http://127.0.0.1:8080 without auth",
+            "nginx webmail.example.com serves /srv/webmail, but nginx ignores .htaccess: 2 are protected only "
+            "there (/config/, /logs/)",
             "nginx shop.example.com: autoindex on at /files/",
             "nginx grafana.example.com looks like an admin site",
             "nginx shop.example.com is served over plain HTTP only",

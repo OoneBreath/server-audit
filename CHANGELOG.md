@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.2: Caddy wildcards, .htaccess, CDN caches, steady drift
+
+Released 7 November 2026. From the written feedback of a v0.3.1 audit of a production Ubuntu 22.04 host.
+Its first four points (translation keys and prose read as secrets, `fail=0` read as a failure, a stopped
+container reported as publishing a port) were already fixed in 0.3.2.
+
+- **Drift no longer reports the same secret as removed and added.** Candidate texts carried the per-run
+  fingerprint, so a secret in process arguments changed on every run. Fingerprints are stripped from the
+  state (older baselines are cleaned when read); secrets are compared by key name and length. A stable
+  per-host salt was not used on purpose: a key kept next to the fingerprints makes them testable offline
+  with guessed passwords.
+- **Caddy path patterns with a `*` inside** (new candidate). Tested on Caddy 2.11.7: such a pattern is a
+  glob where every `*` matches one path segment, so `/a/*/b/*` matches `/a/x/b/y` but not `/a/x/b/y/z`. An
+  auth rule written that way passes a shallow test and leaves deeper paths open. Patterns that also end in
+  `*` are candidates; the REST shape `/items/*/verify` is a note.
+- **`.htaccess` under Caddy or nginx** (new candidate): directories a PHP app protects only with
+  `.htaccess` deny rules (`Deny from all`, `Require all denied`, `RedirectMatch 403`, `RewriteRule … [F]`)
+  are served by Caddy and nginx. Directories the proxy config already names are a note.
+- **`probe_external.sh` notices CDN caches**: a URL answered with `cf-cache-status: HIT` (or `x-cache`,
+  `age`) gets a note, and for hostnames given with `--cdn` the origin is asked directly, so "the fix does not
+  work" and "the CDN still serves the old answer" can be told apart.
+- remediation.md: Caddy wildcard rules and `path_regexp`, verify a fix at the origin before purging the CDN
+  cache, blocking a PHP app's internal directories in Caddy and nginx.
+- Labs: a PHP webmail under nginx with `.htaccess`-only protection (RHEL), a CDN edge stand-in that serves a
+  cached 200 (Ubuntu).
+
 ## 0.4.1: fixes from the server3 audit
 
 Released 7 November 2026. Reported after a v0.3.1 audit of a production Ubuntu 24.04 host, where the agent
