@@ -37,7 +37,7 @@ READ_ONLY = {
     ("fail2ban-client", "status"), ("cscli", "bouncers"), ("aa-status", None), ("sysctl", None), ("ps", "-eo"),
     ("ip", "-o"), ("docker", "image"), ("lastlog", None), ("df", None), ("journalctl", "--disk-usage"),
     ("du", "-sxk"), ("apachectl", "-S"), ("dnf", "-C"), ("needs-restarting", "-r"), ("firewall-cmd", "--state"),
-    ("firewall-cmd", "--get-active-zones"), ("firewall-cmd", "--list-all"), ("getenforce", None), ("rpm", "-qf"),
+    ("firewall-cmd", "--get-active-zones"), ("firewall-cmd", "--list-all"), ("getenforce", None), ("rpm", "-qf"), ("podman", "ps"), ("podman", "inspect"),
 }
 GIT_READ_ONLY = {"remote", "rev-parse", "ls-files"}
 

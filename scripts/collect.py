@@ -272,6 +272,9 @@ def sec_host():
     state("host", "os", m.group(1) if m else "unknown")
     state("host", "kernel", os.uname().release)
     oid, ver, eol, days = os_eol(osr)
+    # facts for comparing hosts (fleet.py); "_" sections are skipped by drift, so counts that move are no noise
+    state("_fleet", "eol", eol)
+    state("_fleet", "eol_days", days)
     if eol is None:
         emit("end of support: %s %s not in the built-in table — check the vendor's release cycle" % (oid, ver))
     elif days < 0:
@@ -291,17 +294,20 @@ def sec_host():
         age = (time.time() - os.stat("/var/run/reboot-required").st_mtime) / 86400
         pk = (read("/var/run/reboot-required.pkgs") or "").split()
         msg = "reboot required for %.0f days (packages: %s)" % (age, ", ".join(sorted(set(pk))[:8]) or "?")
+        state("_fleet", "reboot_required", "yes (%.0f days)" % age)
         if age > 7:
             flag("host", msg + " — security fixes in those packages are NOT active until reboot")
         else:
             emit(msg)
     else:
         emit("reboot required: no")
+        state("_fleet", "reboot_required", "no")
     if have("apt"):
         rc, out = run(["apt", "list", "--upgradable"], timeout=60)
         pk = [l for l in out.splitlines() if "/" in l and "[upgradable" in l]
         sec = [l for l in pk if "-security" in l]
         emit("upgradable packages: %d (from -security: %d)" % (len(pk), len(sec)))
+        state("_fleet", "security_updates", len(sec))
         for l in sec[:15]:
             emit("  security: " + l.split()[0])
         if len(sec) > 0:
@@ -309,6 +315,7 @@ def sec_host():
         rc, ua = run(["systemctl", "is-enabled", "unattended-upgrades"])
         rc2, ua2 = run(["systemctl", "is-active", "unattended-upgrades"])
         emit("unattended-upgrades: enabled=%s active=%s" % (ua.strip(), ua2.strip()))
+        state("_fleet", "auto_updates", "unattended-upgrades %s" % ua.strip())
         cfg = read("/etc/apt/apt.conf.d/20auto-upgrades")
         if cfg:
             emit("  20auto-upgrades: " + " | ".join(l.strip() for l in cfg.splitlines() if l.strip()))
@@ -333,6 +340,7 @@ def dnf_updates():
         lines = [l for l in out.splitlines() if "/Sec." in l]
         adv = {l.split()[0] for l in lines}
         emit("dnf security advisories pending: %d (%d package updates)" % (len(adv), len(lines)))
+        state("_fleet", "security_updates", len(adv))
         for l in lines[:15]:
             emit("  " + " ".join(l.split()[:3]))
         if adv:
@@ -341,8 +349,10 @@ def dnf_updates():
         rc, nr = run(["needs-restarting", "-r"], timeout=60)
         if rc == 1:
             flag("host", "needs-restarting -r: reboot required — updated kernel/core libraries are not active yet")
+            state("_fleet", "reboot_required", "yes")
         elif rc == 0:
             emit("reboot required: no (needs-restarting -r)")
+            state("_fleet", "reboot_required", "no")
     auto = []
     for t in ("dnf-automatic.timer", "dnf-automatic-install.timer"):
         rc, en = run(["systemctl", "is-enabled", t])
@@ -352,6 +362,7 @@ def dnf_updates():
     m = re.search(r"^\s*apply_updates\s*=\s*(\w+)", conf, re.M)
     emit("automatic updates: %s%s" % (", ".join(auto) or "off",
                                       (" (apply_updates=%s)" % m.group(1)) if m and auto else ""))
+    state("_fleet", "auto_updates", ", ".join(auto) or "off")
 
 
 LISTEN = []  # (proto, addr, port, procname, pid)
@@ -683,7 +694,7 @@ SENSITIVE_MOUNT_PREFIX = ("/etc/ssh", "/root/.ssh", "/etc/sudoers", "/etc/shadow
 
 
 def sensitive_mount(src, mode):
-    if src.endswith("docker.sock"):
+    if src.endswith(("docker.sock", "podman.sock")):
         return False  # reported separately
     if src in SENSITIVE_MOUNT_EXACT:
         return mode == "rw" or src == "/"
@@ -722,6 +733,182 @@ def docker_client_configs():
         if regs:
             flag("docker", "%s stores registry credentials base64-encoded, not encrypted (%s) — use a credential "
                  "helper or a read-only pull token" % (f, ", ".join(regs)))
+
+
+def podman_containers(js):
+    """`podman ps -a --format json` -> [{name, image, running, status, ports: [(ip, host_port, ctr_port, proto)]}].
+    Only these fields are read: the JSON also carries labels and the command line, which are never printed."""
+    try:
+        data = json.loads(js or "[]") or []
+    except ValueError:
+        return []
+    out = []
+    for c in data:
+        names = c.get("Names") or [str(c.get("Id", "?"))[:12]]
+        ports = []
+        for p in c.get("Ports") or []:
+            hp, n = p.get("host_port"), int(p.get("range") or 1)
+            ports.append((p.get("host_ip") or "", str(hp) + ("-%d" % (int(hp) + n - 1) if n > 1 and hp else ""),
+                          str(p.get("container_port", "")), p.get("protocol", "tcp")))
+        state_ = str(c.get("State", "")).lower()
+        out.append({"name": names[0], "image": c.get("Image", "?"), "running": state_ in ("running", "paused"),
+                    "status": c.get("Status") or state_ or "?", "ports": ports})
+    return out
+
+
+def quadlet_parse(text):
+    """[Container] keys of a quadlet .container file -> {key: [values]} (repeated keys keep every value)."""
+    out, sec = {}, None
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s or s.startswith(("#", ";")):
+            continue
+        m = re.match(r"^\[(\w+)\]$", s)
+        if m:
+            sec = m.group(1)
+            continue
+        if sec == "Container" and "=" in s:
+            k, v = s.split("=", 1)
+            out.setdefault(k.strip(), []).append(v.strip())
+    return out
+
+
+def quadlet_issues(q):
+    """Risky settings in a parsed quadlet -> [(kind, detail)]; kind in publish/privileged/host-net/mount/cap/unpinned."""
+    issues = []
+    for pp in q.get("PublishPort", []):
+        parts = pp.rsplit("/", 1)[0].split(":")
+        if len(parts) == 2 or (len(parts) == 3 and parts[0] in ("", "0.0.0.0", "[::]", "::")):
+            issues.append(("publish", parts[-2]))
+    args = " ".join(q.get("PodmanArgs", []))
+    if "--privileged" in args:
+        issues.append(("privileged", ""))
+    if q.get("Network", [""])[-1] == "host" or re.search(r"--net(work)?[= ]host\b", args):
+        issues.append(("host-net", ""))
+    for v in q.get("Volume", []):
+        src, _, rest = v.partition(":")
+        dst, _, opts = rest.partition(":")
+        mode = "ro" if "ro" in opts.split(",") else "rw"
+        if src.endswith(("podman.sock", "docker.sock")):
+            issues.append(("socket", "%s -> %s" % (src, dst)))
+        elif src.startswith("/") and sensitive_mount(src, mode):
+            issues.append(("mount", "%s -> %s %s" % (src, dst, mode)))
+    for cap in q.get("AddCapability", []):
+        bad = sorted(set(cap.upper().replace(",", " ").split()) & {"ALL", "SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE",
+                                                                    "NET_ADMIN", "DAC_READ_SEARCH"})
+        if bad:
+            issues.append(("cap", ",".join(bad)))
+    img = (q.get("Image") or [""])[-1]
+    if img and image_unpinned(img):
+        issues.append(("unpinned", img))
+    return issues
+
+
+PODMAN_FMT = ("{{.Name}}|priv={{.HostConfig.Privileged}}|net={{.HostConfig.NetworkMode}}|pid={{.HostConfig.PidMode}}"
+              "|user={{.Config.User}}|restart={{.HostConfig.RestartPolicy.Name}}"
+              "|mounts={{range .Mounts}}{{.Source}}:{{.Destination}}:{{if .RW}}rw{{else}}ro{{end}} {{end}}")
+
+
+def sec_podman():
+    header("PODMAN")
+    rootful_q = sorted(set(glob.glob("/etc/containers/systemd/**/*.container", recursive=True)
+                           + glob.glob("/usr/share/containers/systemd/*.container")))
+    user_q = sorted(glob.glob("/home/*/.config/containers/systemd/**/*.container", recursive=True)
+                    + glob.glob("/root/.config/containers/systemd/**/*.container", recursive=True))
+    if not (have("podman") or rootful_q or user_q):
+        emit("podman not installed")
+        return
+    if have("podman"):
+        rc, out = run(["podman", "ps", "-a", "--format", "json"], timeout=60, mask=False)
+        cs = podman_containers(out) if rc == 0 else []
+        if rc != 0:
+            emit("(podman ps failed — needs root for rootful containers)")
+        emit("rootful containers: %d" % len(cs))
+        for c in cs:
+            emit("  %-30s %-40s %s  ports=%s" % (c["name"], c["image"][:40], c["status"],
+                                                ",".join("%s:%s->%s/%s" % p for p in c["ports"]) or "-"))
+            who = ("rootful Podman container %s" % c["name"] if c["running"] else
+                   "stopped rootful Podman container %s (%s; risk only when started)" % (c["name"], c["status"]))
+            for ip, hp, cp, proto in c["ports"]:
+                if ip in ("", "0.0.0.0", "::") and hp.split("-")[0] not in ("80", "443"):
+                    flag("podman", "%s publishes host port %s/%s on ALL interfaces — with netavark's iptables/nftables "
+                         "driver it is forwarded by DNAT before the INPUT rules ufw/firewalld filter (like Docker); "
+                         "verify from outside" % (who, hp, proto))
+        state("podman", "containers", sorted("%s %s %s" % (c["name"], c["image"], ",".join(
+            "%s:%s->%s" % p[:3] for p in c["ports"])) for c in cs))
+        names = [c["name"] for c in cs]
+        running = {c["name"]: c for c in cs}
+        if names:
+            rc, ins = run(["podman", "inspect", "--format", PODMAN_FMT] + names[:80], timeout=60)
+            emit("container details (no env vars shown):")
+            for l in ins.splitlines():
+                emit("  " + l)
+                n = l.split("|")[0].lstrip("/")
+                c = running.get(n, {"running": True, "status": "?"})
+                who = ("rootful Podman container %s" % n if c["running"] else
+                       "stopped rootful Podman container %s (%s; risk only when started)" % (n, c["status"]))
+                if "|priv=true|" in l:
+                    flag("podman", "%s runs --privileged (root on host if compromised)" % who)
+                if "podman.sock" in l or "docker.sock" in l:
+                    flag("podman", "%s mounts the container engine socket (= root on host)" % who)
+                m = re.search(r"\|mounts=(.*)$", l)
+                for mnt in (m.group(1).split() if m else []):
+                    src, _, rest = mnt.partition(":")
+                    dst, _, mode = rest.rpartition(":")
+                    if sensitive_mount(src, mode):
+                        flag("podman", "%s mounts host %s -> %s %s — a compromised container can %s the host"
+                             % (who, src, dst, mode, "modify" if mode == "rw" else "read all of"))
+        for sock in ("/run/podman/podman.sock", "/var/run/podman/podman.sock"):
+            if os.path.exists(sock):
+                st = os.stat(sock)
+                emit("rootful API socket %s %s %s (whoever can write it is root)" % (sock, mode_str(st), owner_str(st)))
+                if stat.S_IMODE(st.st_mode) & 0o002 or (stat.S_IMODE(st.st_mode) & 0o020 and st.st_gid != 0):
+                    flag("podman", "the rootful Podman API socket %s is writable by %s — that is root on the host"
+                         % (sock, "every local user" if stat.S_IMODE(st.st_mode) & 0o002 else "a non-root group"))
+                break
+    for path in rootful_q + user_q:
+        q = quadlet_parse(read(path))
+        m = re.match(r"^/home/([^/]+)/|^/(root)/", path)
+        rootless = path.startswith(("/home/", "/root/.config")) and m
+        user = (m.group(1) or m.group(2)) if m else None
+        name = (q.get("ContainerName") or [os.path.basename(path).rsplit(".", 1)[0]])[-1]
+        emit("quadlet %s (%s%s): image=%s publish=%s" % (path, "rootless, user " if rootless else "rootful",
+                                                       user if rootless else "", (q.get("Image") or ["?"])[-1],
+                                                       ",".join(q.get("PublishPort", [])) or "-"))
+        who = "%s quadlet %s (%s)" % ("rootless Podman" if rootless else "rootful Podman", name, path)
+        for kind, detail in quadlet_issues(q):
+            if kind == "publish" and detail not in ("80", "443"):
+                flag("podman", "%s publishes host port %s on all interfaces%s" % (
+                    who, detail, " — rootless ports are opened by the user's own process, so the host firewall "
+                    "applies; check it is meant to be reachable" if rootless else " — forwarded by netavark DNAT "
+                    "ahead of ufw/firewalld INPUT rules; verify from outside"))
+            elif kind == "privileged":
+                flag("podman", "%s runs --privileged (%s)" % (who, "every capability of the user's namespace"
+                                                              if rootless else "root on host if compromised"))
+            elif kind == "host-net":
+                emit("  note: %s uses host networking (its ports are host ports)" % name)
+            elif kind == "socket":
+                flag("podman", "%s mounts a container engine socket (%s) — %s" % (
+                    who, detail, "control of that user's containers" if rootless else "root on the host"))
+            elif kind == "mount":
+                flag("podman", "%s mounts %s" % (who, detail))
+            elif kind == "cap":
+                flag("podman", "%s adds capabilities %s" % (who, detail))
+            elif kind == "unpinned":
+                emit("  note: %s image %s has no pinned version (latest/no tag)" % (name, detail))
+    try:
+        linger = sorted(os.listdir("/var/lib/systemd/linger"))
+    except OSError:
+        linger = []
+    if linger:
+        emit("users whose services (and rootless containers) start at boot without a login (linger): %s"
+             % ", ".join(linger))
+    rl = sorted({(p, n, a) for pr, a, p, n, _, k in LISTEN if pr == "tcp" and k != "loopback"
+                 and re.search(r"rootlessport|pasta|slirp4netns|conmon", n)})
+    for p, n, a in rl:
+        emit("rootless container port: %s:%s (%s) — opened by a user's process; the host firewall applies" % (a, p, n))
+    emit("rootless containers of other users are not listed (podman ps as each user would write state into their "
+         "home); the quadlets and ports above show what they publish — to list them: sudo -u USER podman ps -a")
 
 
 AUTH_KEYS = {}  # user -> number of usable authorized_keys lines
@@ -1245,6 +1432,482 @@ def apache_report():
                 flag("web", "apache %s exposes %s without Require local/ip" % (f, m.group(1)))
 
 
+# ---------------------------------------------------------------- Traefik and HAProxy
+def _yaml_scalar(v):
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    return v
+
+
+def _split_flow(s):
+    out, depth, cur, q = [], 0, "", None
+    for ch in s:
+        if q:
+            cur += ch
+            if ch == q:
+                q = None
+            continue
+        if ch in "\"'":
+            q = ch
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+            continue
+        cur += ch
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def _yaml_flow(v):
+    v = v.strip()
+    if v.startswith("[") and v.endswith("]"):
+        return [_yaml_flow(x) for x in _split_flow(v[1:-1])]
+    if v.startswith("{") and v.endswith("}"):
+        d = {}
+        for part in _split_flow(v[1:-1]):
+            k, _, val = part.partition(":")
+            if k.strip():
+                d[_yaml_scalar(k)] = _yaml_flow(val) if val.strip() else None
+        return d
+    return _yaml_scalar(v)
+
+
+def _yaml_strip_comment(line):
+    q = None
+    for i, ch in enumerate(line):
+        if q:
+            if ch == q:
+                q = None
+        elif ch in "\"'":
+            q = ch
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i]
+    return line
+
+
+YAML_KEY = re.compile(r"""^(?P<key>"[^"]*"|'[^']*'|[^\s#'"\[{-][^:#]*?|-[^\s:#][^:#]*?)\s*:(?:\s+(?P<val>.*))?$""")
+
+
+def mini_yaml(text):
+    """Enough YAML for proxy configs (stdlib only): nested maps, lists, flow [a, b] and {a: b}, quotes,
+    comments. Block scalars (| and >) are skipped; anchors and tags are read as plain text."""
+    root = {}
+    stack = [(0, root)]  # (indent of the children, container)
+    pending = None       # (indent, dict, key) after "key:" with nothing behind it
+    block = None         # indent of the key whose block scalar is being skipped
+    for raw in text.replace("\t", "  ").splitlines():
+        if block is not None:
+            if raw.strip() and len(raw) - len(raw.lstrip(" ")) <= block:
+                block = None
+            else:
+                continue
+        line = _yaml_strip_comment(raw).rstrip()
+        s = line.strip()
+        if not s or s in ("---", "...") or s.startswith("%"):
+            continue
+        ind = len(line) - len(line.lstrip(" "))
+        if pending:
+            pind, pd, pk = pending
+            pending = None
+            if ind > pind or (ind == pind and (s == "-" or s.startswith("- "))):
+                new = [] if (s == "-" or s.startswith("- ")) else {}
+                pd[pk] = new
+                stack.append((ind, new))
+        while len(stack) > 1 and ind < stack[-1][0]:
+            stack.pop()
+        cont = stack[-1][1]
+        if s == "-" or s.startswith("- "):
+            if not isinstance(cont, list):
+                continue
+            item = s[1:].strip()
+            col = ind + (len(s) - len(item))
+            m = YAML_KEY.match(item) if item and item[0] not in "[{" else None
+            if m and not (item[0] in "\"'" and item.rstrip().endswith(item[0]) and m.group("val") is None
+                          and item.rstrip()[-1] != ":"):
+                d = {}
+                cont.append(d)
+                stack.append((col, d))
+                key, val = _yaml_scalar(m.group("key")), m.group("val")
+                if val is None or not val.strip():
+                    d[key] = None
+                    pending = (col, d, key)
+                else:
+                    d[key] = _yaml_flow(val)
+            elif item:
+                cont.append(_yaml_flow(item))
+            continue
+        # a key after a list written at its parent's indent ("key:\n- a\nnext: b") closes that list
+        while isinstance(cont, list) and len(stack) > 1 and ind <= stack[-1][0]:
+            stack.pop()
+            cont = stack[-1][1]
+        m = YAML_KEY.match(s)
+        if not m or not isinstance(cont, dict):
+            continue
+        key, val = _yaml_scalar(m.group("key")), m.group("val")
+        if val is None or not val.strip():
+            cont[key] = None
+            pending = (ind, cont, key)
+        elif val.strip()[:1] in ("|", ">"):
+            cont[key] = ""
+            block = ind
+        else:
+            cont[key] = _yaml_flow(val)
+    return root
+
+
+def flatten(obj, prefix=""):
+    """Nested config -> {"dotted.lower.key": value}; a list of scalars stays a list."""
+    out = {}
+    if isinstance(obj, dict):
+        if not obj and prefix:
+            out[prefix[:-1]] = ""  # an empty map still says the option is on: tls: {}, docker: {}
+        for k, v in obj.items():
+            out.update(flatten(v, "%s%s." % (prefix, str(k).lower())))
+    elif isinstance(obj, list):
+        if all(not isinstance(x, (dict, list)) for x in obj):
+            out[prefix[:-1]] = ["" if x is None else str(x) for x in obj]
+        else:
+            for i, x in enumerate(obj):
+                out.update(flatten(x, "%s%d." % (prefix, i)))
+    elif prefix:
+        out[prefix[:-1]] = "" if obj is None else str(obj).lower() if isinstance(obj, bool) else str(obj)
+    return out
+
+
+def load_config(path):
+    """A Traefik YAML or TOML file -> flat dict ({} when unreadable; TOML needs Python 3.11+)."""
+    body = read(path)
+    if body is None:
+        return {}
+    if path.endswith(".toml"):
+        try:
+            import tomllib
+        except ImportError:
+            emit("  (%s: TOML needs Python 3.11+, not parsed)" % path)
+            return {}
+        try:
+            return flatten(tomllib.loads(body))
+        except ValueError as e:
+            emit("  (%s: TOML not parsed: %s)" % (path, str(e)[:80]))
+            return {}
+    return flatten(mini_yaml(body))
+
+
+def cli_flags(args):
+    """["--api.insecure=true", "--entrypoints.web.address=:80", "--api.dashboard"] -> flat dict."""
+    out = {}
+    for a in args or []:
+        m = re.match(r"^--([A-Za-z][\w.\-]*)(?:=(.*))?$", a)
+        if m:
+            out[m.group(1).lower()] = m.group(2) if m.group(2) is not None else "true"
+    return out
+
+
+def _listify(v):
+    if isinstance(v, list):
+        return [x.strip() for x in v if x.strip()]
+    return [x.strip() for x in str(v).split(",") if x.strip()]
+
+
+TRAEFIK_AUTH = {"basicauth", "digestauth", "forwardauth", "ipallowlist", "ipwhitelist"}
+
+
+def traefik_model(flats):
+    """[(origin, flat dynamic config)] -> (routers, middlewares). Labels pass their keys without "traefik."."""
+    routers, mws = {}, {}
+    for origin, flat in flats:
+        for k, v in flat.items():
+            m = re.match(r"^http\.routers\.([^.]+)\.(.+)$", k)
+            if m:
+                r = routers.setdefault(m.group(1), {"origin": origin, "entrypoints": [], "middlewares": []})
+                field = m.group(2)
+                if field in ("rule", "service"):
+                    r[field] = v if isinstance(v, str) else ",".join(v)
+                elif field.startswith("entrypoints"):
+                    r["entrypoints"] += _listify(v)
+                elif field.startswith("middlewares"):
+                    r["middlewares"] += _listify(v)
+                elif field == "tls" or field.startswith("tls."):
+                    r["tls"] = str(v).lower() != "false"
+                continue
+            m = re.match(r"^http\.middlewares\.([^.]+)\.([^.]+)(.*)$", k)
+            if m:
+                mw = mws.setdefault(m.group(1), {"types": set(), "chain": []})
+                mw["types"].add(m.group(2))
+                if m.group(2) == "chain" and m.group(3).startswith(".middlewares"):
+                    mw["chain"] += _listify(v)
+    return routers, mws
+
+
+def _mw_protects(name, mws, seen=()):
+    """True/False when the middleware is known to (not) authenticate, None when it is defined elsewhere."""
+    name = name.split("@")[0]
+    mw = mws.get(name)
+    if mw is None:
+        return None
+    if mw["types"] & TRAEFIK_AUTH:
+        return True
+    if "chain" in mw["types"]:
+        res = [_mw_protects(c, mws, seen + (name,)) for c in mw["chain"] if c.split("@")[0] not in seen + (name,)]
+        return True if any(res) else (None if None in res else False)
+    return False
+
+
+def _rule_hosts(rule):
+    hosts = []
+    for inner in re.findall(r"Host(?:Regexp|SNI)?\(([^)]*)\)", rule or ""):
+        hosts += [a or b for a, b in re.findall(r"`([^`]+)`|\"([^\"]+)\"", inner)]
+    return hosts
+
+
+def traefik_report(static, flats):
+    """static: flat static config (file + CLI); flats: [(origin, flat dynamic config)] from files and labels."""
+    routers, mws = traefik_model(flats)
+    eps = {}
+    for k, v in static.items():
+        m = re.match(r"^entrypoints\.([^.]+)\.address$", k)
+        if m:
+            eps[m.group(1)] = v
+    redirect = {m.group(1) for k in static for m in [re.match(r"^entrypoints\.([^.]+)\.http\.redirections\.", k)] if m}
+    emit("traefik entrypoints: %s" % (", ".join("%s=%s%s" % (n, a, " (redirects)" if n in redirect else "")
+                                                for n, a in sorted(eps.items())) or "(none in the static config)"))
+    insecure = static.get("api.insecure", "false").lower() == "true"
+    if insecure:
+        flag("web", "Traefik API and dashboard are served without auth (api.insecure=true) on the traefik entrypoint "
+             "(%s) — anyone who reaches that port sees every router, service and backend address"
+             % eps.get("traefik", ":8080 by default"))
+    if any(k.startswith("providers.docker") for k in static):
+        exp = static.get("providers.docker.exposedbydefault", "true").lower()
+        emit("traefik docker provider: exposedByDefault=%s%s" % (
+            exp, " — every container on a shared network gets a router unless it sets traefik.enable=false"
+            if exp != "false" else ""))
+    for name, r in sorted(routers.items()):
+        rule = r.get("rule", "")
+        hosts = _rule_hosts(rule)
+        paths = re.findall(r"Path(?:Prefix)?\(\s*`([^`]+)`", rule)
+        prot = [_mw_protects(m, mws) for m in r["middlewares"]]
+        protected = any(prot)
+        unknown = None in prot
+        mw_desc = ["%s(%s)" % (m, ",".join(sorted(mws[m.split("@")[0]]["types"])) if m.split("@")[0] in mws else "?")
+                   for m in r["middlewares"]]
+        r_eps = r["entrypoints"] or sorted(eps)
+        tls = r.get("tls", False)
+        emit("  router %-22s [%s] rule=%s service=%s entrypoints=%s middlewares=%s tls=%s" % (
+            name, r["origin"], rule[:120] or "(default rule)", r.get("service", "?"), ",".join(r_eps) or "?",
+            ",".join(mw_desc) or "none", "yes" if tls else "no"))
+        what = ", ".join(hosts + paths) or rule[:60] or name
+        dashboard = r.get("service", "").startswith("api@internal")
+        admin = dashboard or any(ADMIN_NAME.match(h) for h in hosts) or any(ADMIN_PATH.search(p) for p in paths)
+        if admin and not protected and not unknown:
+            flag("web", "traefik router %s (%s) %s and has no auth middleware (basicAuth, forwardAuth or ipAllowList)"
+                 % (name, what, "serves the Traefik dashboard" if dashboard else "looks like an admin site"))
+        plain = r_eps and all(str(eps.get(e, "")).endswith(":80") and e not in redirect for e in r_eps)
+        redirects = any("redirectscheme" in (mws.get(m.split("@")[0]) or {}).get("types", set()) for m in r["middlewares"])
+        if plain and not tls and not redirects and not dashboard:
+            flag("web", "traefik router %s (%s) is served over plain HTTP only (entrypoints %s, no TLS, no redirect)"
+                 % (name, what, ",".join(r_eps)))
+    state("web", "traefik_routers", ["%s %s" % (n, r.get("rule", "")) for n, r in sorted(routers.items())])
+
+
+def sec_traefik():
+    """Find Traefik's static config, CLI flags, file-provider configs and Docker labels; report routers."""
+    static_files = [p for p in ("/etc/traefik/traefik.yml", "/etc/traefik/traefik.yaml", "/etc/traefik/traefik.toml")
+                    if os.path.isfile(p)]
+    cli = {}
+    rc, es = run(["systemctl", "show", "traefik", "-p", "ExecStart"], mask=False)
+    m = re.search(r"argv\[\]=([^;]+)", es)
+    if m:
+        argv = m.group(1).split()
+        cli.update(cli_flags(argv))
+        for a in argv:
+            cm = re.match(r"^--config[Ff]ile=(\S+)$", a)
+            if cm and os.path.isfile(cm.group(1)):
+                static_files.append(cm.group(1))
+    label_flats, mounts = [], []
+    if have("docker"):
+        rc, names = run(["docker", "ps", "--format", "{{.Names}}"], mask=False)
+        names = [n for n in names.split() if n and not n.startswith("(")]
+        if rc == 0 and names:
+            fmt = ("{{.Name}}\t{{.Config.Image}}\t{{json .Config.Labels}}\t{{json .Args}}\t"
+                   "{{range .Mounts}}{{.Source}}={{.Destination}};{{end}}")
+            rc, ins = run(["docker", "inspect", "--format", fmt] + names[:80], timeout=60, mask=False)
+            for l in ins.splitlines():
+                cols = l.split("\t")
+                if len(cols) < 5:
+                    continue
+                try:
+                    labels = json.loads(cols[2]) or {}
+                    args = json.loads(cols[3]) or []
+                except ValueError:
+                    continue
+                tl = {k[len("traefik."):].lower(): v for k, v in labels.items() if k.lower().startswith("traefik.")}
+                if tl:
+                    label_flats.append(("docker " + cols[0].lstrip("/"), tl))
+                if "traefik" in cols[1].split("/")[-1].split(":")[0]:
+                    cli.update(cli_flags(args))
+                    mounts += [tuple(x.split("=", 1)) for x in cols[4].split(";") if "=" in x]
+    def host_path(p):
+        # a path inside the Traefik container -> the host file mounted there
+        for src, dst in sorted(mounts, key=lambda x: -len(x[1])):
+            if p == dst or p.startswith(dst.rstrip("/") + "/"):
+                return src + p[len(dst):]
+        return p
+    for dst in ("/etc/traefik/traefik.yml", "/etc/traefik/traefik.yaml", "/etc/traefik/traefik.toml", "/traefik.yml",
+                "/traefik.yaml", "/traefik.toml"):
+        hp = host_path(dst)
+        if hp != dst and os.path.isfile(hp):
+            static_files.append(hp)
+    if cli.get("configfile"):
+        hp = host_path(cli["configfile"])
+        if os.path.isfile(hp):
+            static_files.append(hp)
+    if not (static_files or cli or label_flats or have("traefik")):
+        return
+    emit("")
+    emit("traefik: static config %s%s; %d container(s) with traefik labels" % (
+        ", ".join(sorted(set(static_files))) or "(none found)", "; CLI flags" if cli else "", len(label_flats)))
+    static = {}
+    for f in sorted(set(static_files)):
+        static.update(load_config(f))
+    static.update(cli)
+    flats = list(label_flats)
+    fname = static.get("providers.file.filename")
+    fdir = static.get("providers.file.directory")
+    dyn = []
+    if fname:
+        dyn.append(host_path(fname))
+    if fdir:
+        d = host_path(fdir)
+        dyn += sorted(glob.glob(os.path.join(d, "*.y*ml")) + glob.glob(os.path.join(d, "*.toml")))
+    for f in dyn:
+        if os.path.isfile(f):
+            flats.append(("file " + f, load_config(f)))
+    # a static file can carry dynamic sections too when it is also the file provider's target
+    flats.append(("static", {k: v for k, v in static.items() if k.startswith("http.")}))
+    traefik_report(static, flats)
+
+
+HAP_SECTION = re.compile(r"^\s*(global|defaults|frontend|backend|listen|userlist|peers|resolvers|cache|program|"
+                         r"mailers|http-errors|ring)\b\s*(\S*)")
+
+
+def haproxy_sections(text):
+    secs, cur = [], None
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        m = HAP_SECTION.match(line)
+        if m:
+            cur = {"kind": m.group(1), "name": m.group(2) or "", "lines": []}
+            secs.append(cur)
+        elif cur is not None:
+            cur["lines"].append(" ".join(line.split()))
+    return secs
+
+
+def _hap_public(bind):
+    a = bind.split(",")[0]
+    return not re.match(r"^(127\.|\[?::1\]?:|localhost:|unix@|/|abns@)", a)
+
+
+def haproxy_report(text, path, mode):
+    secs = haproxy_sections(text)
+    default_mode = "http"
+    summary = []
+    for sec in secs:
+        L, kind, name = sec["lines"], sec["kind"], sec["name"]
+        if kind == "defaults":
+            for l in L:
+                mm = re.match(r"mode (\w+)", l)
+                if mm:
+                    default_mode = mm.group(1)
+        if kind == "global":
+            for l in L:
+                mm = re.match(r"stats socket (\S+)(.*)$", l)
+                if not mm:
+                    continue
+                addr, rest = mm.group(1), mm.group(2)
+                admin = bool(re.search(r"\blevel admin\b", rest))
+                if not addr.startswith(("/", "unix@", "abns@")):
+                    flag("web", "HAProxy runtime API on the network (stats socket %s%s): whoever reaches it can %s"
+                         % (addr, " level admin" if admin else "", "disable servers, change weights and read every "
+                            "backend address" if admin else "read every backend address and state"))
+                elif re.search(r"\bmode 0?[0-7][0-7][2367]\b", rest):
+                    flag("web", "HAProxy runtime socket %s is writable by every local user (%s)" % (addr, rest.strip()))
+        if kind == "userlist":
+            for l in L:
+                if re.match(r"user \S+ insecure-password ", l):
+                    flag("web", "HAProxy userlist %s stores a plain-text password (insecure-password) — use `password` "
+                         "with a crypt hash" % name)
+                    break
+        if kind not in ("frontend", "listen"):
+            continue
+        binds = [l.split()[1] for l in L if l.startswith("bind ") and len(l.split()) > 1]
+        ssl = any(l.startswith("bind ") and re.search(r"\sssl\b", l) for l in L)
+        mode_ = next((mm.group(1) for l in L for mm in [re.match(r"mode (\w+)", l)] if mm), default_mode)
+        stats = any(re.match(r"stats (enable|uri|admin)\b", l) for l in L)
+        uri = next((l.split()[2] for l in L if re.match(r"stats uri \S+", l)), "/haproxy?stats")
+        auth = any(re.match(r"stats auth \S", l) or re.match(r"(stats )?http-request (auth|deny)\b", l) for l in L)
+        public = [b for b in binds if _hap_public(b)]
+        summary.append("%s %s mode=%s binds=%s%s%s" % (kind, name, mode_, ",".join(binds) or "-",
+                                                      " ssl" if ssl else "", " stats=" + uri if stats else ""))
+        if stats and not auth:
+            flag("web", "HAProxy stats page in %s %s (bind %s, uri %s) has no auth%s" % (
+                kind, name, ",".join(binds) or "?", uri,
+                " and allows admin actions (stats admin)" if any(l.startswith("stats admin") for l in L) else ""))
+        if mode_ != "http":
+            continue
+        admin_acls = set()
+        for l in L:
+            mm = re.match(r"acl (\S+) (path_beg|path|path_reg|path_sub|url_beg|path_dir|hdr\(host\)|hdr_beg\(host\)|"
+                          r"hdr_dom\(host\)|req\.hdr\(host\)|var\(\S+\))(?: -\w+)* (.+)$", l)
+            if mm and any(ADMIN_PATH.search(v) or ADMIN_NAME.match(v) for v in mm.group(3).split()):
+                admin_acls.add(mm.group(1))
+        routes = []
+        for l in L:
+            mm = re.match(r"use_backend (\S+) if (.+)$", l)
+            if mm and (set(re.findall(r"!?([\w.\-]+)", mm.group(2))) & admin_acls
+                       or re.search(r"\{[^}]*\b(path_beg|path)\b[^}]*\}", mm.group(2)) and ADMIN_PATH.search(mm.group(2))):
+                routes.append(mm.group(1))
+        guarded = any(re.match(r"http-request (auth|deny)\b", l) for l in L)
+        if routes and not guarded and public:
+            flag("web", "HAProxy %s %s routes admin-like paths/hosts to backend %s without auth (no http-request "
+                 "auth/deny in the %s)" % (kind, name, ",".join(sorted(set(routes))), kind))
+        redirect = any(re.match(r"(http-request )?redirect scheme https", l) for l in L)
+        if public and not ssl and not redirect:
+            flag("web", "HAProxy %s %s serves plain HTTP only on %s (no ssl bind, no redirect to https)"
+                 % (kind, name, ",".join(public)))
+    for s in summary:
+        emit("  " + s)
+    state("web", "haproxy", summary)
+    if mode & 0o004 and re.search(r"(?m)^\s*(stats auth |user \S+ (insecure-)?password )", text):
+        flag("web", "%s is readable by every local user and holds HAProxy passwords (stats auth / userlist)" % path)
+
+
+def sec_haproxy():
+    files = [p for p in ["/etc/haproxy/haproxy.cfg"] + sorted(glob.glob("/etc/haproxy/conf.d/*.cfg")) if os.path.isfile(p)]
+    if not files:
+        if have("haproxy"):
+            emit("haproxy installed, no /etc/haproxy/haproxy.cfg")
+        return
+    for f in files:
+        body = read(f)
+        if body is None:
+            emit("(cannot read %s)" % f)
+            continue
+        st = os.stat(f)
+        emit("")
+        emit("haproxy config %s %s %s" % (f, mode_str(st), owner_str(st)))
+        haproxy_report(body, f, stat.S_IMODE(st.st_mode))
+
+
 def sec_web():
     header("WEB / REVERSE PROXY")
     if have("caddy"):
@@ -1298,6 +1961,8 @@ def sec_web():
         for l in ngx.splitlines()[:600]:
             emit("    " + l)
     apache_report()
+    sec_traefik()
+    sec_haproxy()
     emit("")
     emit(".git directories inside web roots (may be downloadable):")
     found = 0
@@ -2024,7 +2689,7 @@ def sec_processes():
 
 # ---------------------------------------------------------------- main
 # Facts one section reads from another: backups and processes look at the cron lines.
-NEEDS = {"backups": ["cron"], "processes": ["cron"]}
+NEEDS = {"backups": ["cron"], "processes": ["cron"], "podman": ["network"]}
 
 
 def run_quietly(fn, name):
@@ -2040,7 +2705,7 @@ def run_quietly(fn, name):
     STATE.pop(name, None)
 
 
-SECTIONS = [sec_host, sec_network, sec_firewall, sec_docker, sec_ssh, sec_users, sec_services, sec_cron,
+SECTIONS = [sec_host, sec_network, sec_firewall, sec_docker, sec_podman, sec_ssh, sec_users, sec_services, sec_cron,
             sec_web, sec_tls, sec_files, sec_git, sec_backups, sec_disk, sec_hardening, sec_injection, sec_processes]
 
 

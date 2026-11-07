@@ -63,7 +63,7 @@ Optional `findings.json` next to the report (mode 600, same leak check), for das
 tracking status across audits — one object per finding, no secret values, no fingerprints:
 
 ```json
-{"host": "<hostname>", "date": "YYYY-MM-DD", "skill_version": "0.3.2",
+{"host": "<hostname>", "date": "YYYY-MM-DD", "skill_version": "0.4.0",
  "findings": [{"id": 1, "title": "…", "severity": "HIGH", "confidence": "verified-outside",
                "area": "exposure", "status": "open", "path": "A"}],
  "backup_ladder": {"exists": true, "fresh": true, "offsite": false, "encrypted": null,

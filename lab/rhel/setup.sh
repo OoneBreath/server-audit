@@ -2,7 +2,7 @@
 # Every secret below is generated at build time and FAKE. Never run this image anywhere reachable.
 set -e
 dnf -y -q install python3 nginx openssh-server sudo cronie iproute procps-ng git findutils which \
-    firewalld libselinux-utils shadow-utils util-linux >/dev/null
+    firewalld libselinux-utils shadow-utils util-linux haproxy >/dev/null
 useradd -m -u 1000 ops
 useradd -m deploy
 echo 'ops ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ops
@@ -62,6 +62,34 @@ EOS
 chmod 755 /usr/local/sbin/shop-offsite.sh
 echo '30 3 * * * root /usr/local/sbin/shop-offsite.sh' > /etc/cron.d/shop-offsite
 tar czf /var/backups/shop/shop-2026-11-01.tgz /srv/www 2>/dev/null
+
+# HAProxy: the runtime API on the network, a stats page without auth, /admin routed without auth, a plain-text
+# userlist password (FAKE) in a config every local user can read
+cat > /etc/haproxy/haproxy.cfg <<EOS
+global
+    log /dev/log local0
+    stats socket ipv4@0.0.0.0:9999 level admin
+defaults
+    mode http
+    timeout connect 5s
+    timeout client 30s
+    timeout server 30s
+userlist staff
+    user admin insecure-password $(python3 -c 'import secrets;print(secrets.token_urlsafe(14))')
+frontend public
+    bind *:8081
+    acl is_admin path_beg /admin
+    use_backend app if is_admin
+    default_backend app
+listen stats
+    bind *:8404
+    stats enable
+    stats uri /stats
+    stats admin if TRUE
+backend app
+    server a1 127.0.0.1:8080
+EOS
+chmod 644 /etc/haproxy/haproxy.cfg
 
 # a SUID copy of find that no package owns
 cp /usr/bin/find /usr/local/bin/findx && chmod 4755 /usr/local/bin/findx

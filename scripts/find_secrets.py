@@ -158,7 +158,8 @@ class Scanner:
         prose = secretlib.is_prose_path(path)
         in_key = False
         per_file = 0
-        for i, line in enumerate(text.splitlines(), 1):
+        lines = text.splitlines()
+        for i, line in enumerate(lines, 1):
             if in_key:
                 if "PRIVATE KEY-----" in line and "END" in line:
                     in_key = False
@@ -166,8 +167,19 @@ class Scanner:
             if len(line) > 20000:
                 line = line[:20000]
             _, found = secretlib.scan_line(line, code=code, lenient=True, prose=prose)
+            if found and known_example(path, found):
+                found = [f for f in found if not known_example(path, [f])]
             if secretlib.PEM_HEADER.match(line):
                 in_key = True
+                # fingerprint the key itself, not its header: every key shares the header, and the same key
+                # body in two places (or on two hosts: a cloned image) is the finding worth seeing
+                body = []
+                for nxt in lines[i:i + 200]:
+                    if "PRIVATE KEY-----" in nxt and "END" in nxt:
+                        break
+                    body.append(nxt.strip())
+                found = [secretlib.key_body_finding("".join(body)) if f["type"] == "private-key" else f
+                         for f in found]
             for f in found:
                 per_file += 1
                 if per_file > 200:
@@ -207,6 +219,7 @@ class Scanner:
             "mode": ("%04o %s" % (stat.S_IMODE(st.st_mode), owner(st))) if st else "-",
             "len": f["length"],
             "fp": f["fp"],
+            "xfp": f.get("xfp"),
             "weak": f["weak"],
         }
         self.hits.append(rec)
@@ -256,14 +269,34 @@ class Scanner:
             return
         commit, fname = "?", "?"
         seen = set()
+        key_body = None  # (fname, commit, [lines]) while a private key is being added in a diff
         try:
+            def flush(kb):
+                f = secretlib.key_body_finding("".join(kb[2]))
+                if (f["fp"], kb[0]) not in seen:
+                    seen.add((f["fp"], kb[0]))
+                    tags = ["GIT-HISTORY"] + (["example?"] if EXAMPLE.search(kb[0]) else [])
+                    self.add(tags, f, "%s@%s:%s" % (repo, kb[1], kb[0]), "+")
             for raw in p.stdout:
                 line = raw.decode("utf-8", "replace").rstrip("\n")
+                added = line.startswith("+") and not line.startswith("+++")
+                if key_body is not None and not added:
+                    flush(key_body)  # the hunk ended before the END line
+                    key_body = None
                 if line.startswith("commit "):
                     commit = line[7:].strip()
                 elif line.startswith("+++ "):
                     fname = line[6:] if line.startswith("+++ b/") else line[4:]
+                elif key_body is not None:
+                    if "PRIVATE KEY-----" in line and "END" in line:
+                        flush(key_body)
+                        key_body = None
+                    else:
+                        key_body[2].append(line[1:].strip())
                 elif line.startswith("+") and not line.startswith("+++"):
+                    if secretlib.PEM_HEADER.match(line[1:]):
+                        key_body = (fname, commit, [])
+                        continue
                     _, found = secretlib.scan_line(line[1:2000], code=secretlib.is_code_path(fname), lenient=True,
                                                    prose=secretlib.is_prose_path(fname))
                     for f in found:
@@ -276,6 +309,16 @@ class Scanner:
         finally:
             p.kill()
             p.wait()
+
+
+# Examples that ship in distribution configs, identical on every install (not this host's secrets):
+# OpenSSL's CMP demo section (`secret = pass:insta`).
+KNOWN_EXAMPLES = {"openssl.cnf": {"secret"}}
+
+
+def known_example(path, found):
+    keys = KNOWN_EXAMPLES.get(os.path.basename(path))
+    return bool(keys) and all(f.get("key") in keys for f in found)
 
 
 SEVERITY_ORDER = ["TRANSCRIPT", "GIT-HISTORY", "GIT-TRACKED", "WORLD-READABLE", "SHELL-HISTORY", "LOG",
@@ -301,9 +344,17 @@ def main():
     ap.add_argument("--max-mb", type=float, default=5.0, help="skip files larger than this (transcripts: 40x)")
     ap.add_argument("--out", help="write the report to this file (mode 600) instead of stdout")
     ap.add_argument("--include-examples", action="store_true", help="show hits in example/test files too")
+    ap.add_argument("--fleet-key-stdin", action="store_true",
+                    help="read a comparison key (hex, from fleet.py key) on stdin and add xfp= fingerprints that "
+                         "match across hosts audited with the same key; the key is never written anywhere")
     args = ap.parse_args()
 
     os.umask(0o077)
+    if args.fleet_key_stdin:
+        line = sys.stdin.readline().strip()
+        if not re.fullmatch(r"[0-9a-f]{32,128}", line):
+            sys.exit("find_secrets: --fleet-key-stdin expects the hex key from `fleet.py key` on stdin")
+        secretlib.set_fleet_key(bytes.fromhex(line))
     s = Scanner(int(args.max_mb * 1024 * 1024), args.transcripts, args.exclude)
     s.walk(args.paths or DEFAULT_PATHS)
     skipped_hist = []
@@ -323,6 +374,9 @@ def main():
                   " (+history)" if args.git_history else "", s.skipped_large,
                   "root" if os.geteuid() == 0 else "NON-ROOT (unreadable files missed)"))
     out.append("hits: %d (examples/tests hidden: %d)" % (len(hits), len(s.hits) - len(hits)))
+    if secretlib.fleet_key_id():
+        out.append("fleet key id: %s (xfp= values match across hosts scanned with this key; delete the key after "
+                   "the comparison)" % secretlib.fleet_key_id())
     if s.public:
         out.append("public-by-design keys seen (PostHog phc_, Stripe pk_, Mapbox pk.; not secrets, not listed): %d"
                    % len(s.public))
@@ -331,9 +385,9 @@ def main():
                    + ", ".join(skipped_hist))
     out.append("")
     for h in hits:
-        out.append("%-34s %-22s %s  key=%s  %s  len=%d fp=%s%s" % (
+        out.append("%-34s %-22s %s  key=%s  %s  len=%d fp=%s%s%s" % (
             ",".join(h["tags"]) or "-", h["type"], h["where"], h["key"] or "-", h["mode"], h["len"], h["fp"],
-            " WEAK" if h["weak"] else ""))
+            (" xfp=" + h["xfp"]) if h.get("xfp") else "", " WEAK" if h["weak"] else ""))
     out.append("")
     out.append("values found in more than one place (rotate together; different keys = reused secret):")
     any_dup = False

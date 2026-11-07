@@ -1,7 +1,7 @@
 ---
 name: server-audit
-description: This skill should be used when the user asks to audit, security-check or harden a Linux server or VPS they run (Ubuntu, Debian, RHEL family; Caddy, nginx, Apache; Docker), e.g. "audit this server", "security check the VPS", "what is exposed to the internet", "check open ports / firewall / SSH", "are there secrets lying around on the box", "is Docker bypassing ufw", "check the Caddy/nginx auth on admin routes", "audyt serwera", "sprawdź bezpieczeństwo VPS", "co jest wystawione do internetu", or after an incident (leaked key, outage, unexpected login) to find what else is wrong. Read-only inventory of the host (ports, firewall incl. Docker, SSH, users and sudo, services, reverse proxy, TLS, secrets and permissions, backups, disk, updates and end of support, DNS and mail authentication, AI agents and injection text), drift since the last audit, verification of every finding (outside-in from another host where possible), a severity-ranked report, and fixes only after explicit approval. Not for reviewing application source code.
-version: 0.3.2
+description: This skill should be used when the user asks to audit, security-check or harden a Linux server or VPS they run (Ubuntu, Debian, RHEL family; Caddy, nginx, Apache, Traefik, HAProxy; Docker, Podman), e.g. "audit this server", "security check the VPS", "what is exposed to the internet", "check open ports / firewall / SSH", "are there secrets lying around on the box", "is Docker bypassing ufw", "check the Caddy/nginx auth on admin routes", "audyt serwera", "sprawdź bezpieczeństwo VPS", "co jest wystawione do internetu", "compare my servers", or after an incident (leaked key, outage, unexpected login) to find what else is wrong. Read-only inventory of the host (ports, firewall incl. Docker, SSH, users and sudo, services, reverse proxy, TLS, secrets and permissions, backups, disk, updates and end of support, DNS and mail authentication, AI agents and injection text), drift since the last audit, comparison of several hosts, verification of every finding (outside-in from another host where possible), a severity-ranked report, and fixes only after explicit approval. Not for reviewing application source code.
+version: 0.4.0
 ---
 
 # Server audit
@@ -158,6 +158,26 @@ at the end, and update the report's findings to `fixed` / `open`. A **restore te
 backup is an approved fix like any other: restore into a temporary directory, never over live data
 (`references/remediation.md`, Backups).
 
+### 7b. Several hosts (when the operator runs more than one)
+
+Audit each host on its own first (its own session or SSH, steps 1–6). Then compare them on the
+operator's machine, which never connects anywhere:
+
+```bash
+python3 -I <skill>/scripts/fleet.py key        # one comparison key, ~/.server-audit/fleet.key (600)
+ssh HOST 'sudo python3 -I <skill>/scripts/find_secrets.py --git-history --fleet-key-stdin \
+    --out ~/.server-audit/<run>/secrets.txt' < ~/.server-audit/fleet.key     # on every host
+# copy each host's state.json + secrets.txt (no values in either) into one directory per host
+python3 -I <skill>/scripts/fleet.py compare HOST1-RUN HOST2-RUN … --out ~/.server-audit/fleet.txt
+python3 -I <skill>/scripts/fleet.py key --delete
+```
+
+It reports the same SSH key or the same secret value on several hosts (one leak opens all of them),
+sshd and firewall settings that differ, hosts lagging on security updates or end of support, ports open
+on some hosts only, every host's backup ladder in one table, and candidates shared by several hosts
+(fix once, everywhere). The key goes over stdin, never into argv or a file on the host; delete it after
+the comparison (while it exists, the `xfp=` values can be tested against guessed passwords).
+
 ### 8. Record
 
 If the workspace keeps a project memory, save the audit as a topic: date, scope, findings with
@@ -167,16 +187,19 @@ values, no fingerprints. Point to the report path instead of copying it.
 ## Scripts
 
 - **`scripts/collect.py`** — read-only inventory + `state.json` + drift. `--out DIR`, `--only …`
-  (sections: host, network, firewall, docker, ssh, users, services, cron, web, tls, files, git,
-  backups, disk, hardening, injection, processes), `--baseline STATE` (compare with a specific run),
+  (sections: host, network, firewall, docker, podman, ssh, users, services, cron, web, tls, files,
+  git, backups, disk, hardening, injection, processes; web covers Caddy, nginx, Apache, Traefik and
+  HAProxy), `--baseline STATE` (compare with a specific run),
   `--fail-on-drift` (exit 3 on changes, for cron).
   Run as root via sudo; output is chowned to the sudo caller.
 - **`scripts/diff_state.py OLD NEW`** — compare any two runs (state.json or run dirs); `--json`,
   `--exit-code`.
 - **`scripts/dns_check.py`** — DNS and mail-authentication check (dig only).
 - **`scripts/find_secrets.py`** — secret locator. `PATH…` (default system/app/home roots),
-  `--git-history`, `--transcripts`, `--out FILE`, `--include-examples`, `--max-mb N`. Also the
-  leak check for any file about to be shared.
+  `--git-history`, `--transcripts`, `--out FILE`, `--include-examples`, `--max-mb N`,
+  `--fleet-key-stdin` (cross-host fingerprints for fleet.py). Also the leak check for any file about
+  to be shared.
+- **`scripts/fleet.py`** — compare several hosts' runs on the operator's machine (`key`, `compare`).
 - **`scripts/probe_external.sh`** — outside-in probe for one target: open ports, what answers
   (plain HTTP on admin ports, SSH auth methods offered, mail banners), TLS versions/HSTS/cert, CDN
   origin bypass, URL expectation matrix, IPv4 vs IPv6 port comparison. bash + curl + openssl only.

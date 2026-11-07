@@ -12,6 +12,29 @@ import os
 import re
 
 _RUN_KEY = os.urandom(32)
+# Cross-host fingerprints (fleet.py): a key the operator generates for one comparison and passes on stdin.
+# Never stored on the audited host; without it, fingerprints are only comparable within one run.
+_FLEET_KEY = None
+
+
+def set_fleet_key(key: bytes):
+    global _FLEET_KEY
+    if len(key) < 16:
+        raise ValueError("fleet key too short")
+    _FLEET_KEY = key
+
+
+def fleet_key_id():
+    """Which comparison key a report was made with (same formula as fleet.key_id); None without a key."""
+    if _FLEET_KEY is None:
+        return None
+    return hmac.new(_FLEET_KEY, b"server-audit fleet key id", hashlib.sha256).hexdigest()[:8]
+
+
+def fleet_fingerprint(value: str):
+    if _FLEET_KEY is None:
+        return None
+    return hmac.new(_FLEET_KEY, value.encode("utf-8", "replace"), hashlib.sha256).hexdigest()[:12]
 
 # Known token formats: (type, regex). Order matters: more specific first.
 TOKEN_PATTERNS = [
@@ -31,6 +54,7 @@ TOKEN_PATTERNS = [
     ("telegram-bot-token", re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_\-]{33}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
     ("bcrypt-hash", re.compile(r"\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}")),
+    ("apr1-hash", re.compile(r"\$apr1\$[./A-Za-z0-9]{1,8}\$[./A-Za-z0-9]{22}")),  # htpasswd, Traefik basicAuth
     ("bearer-token", re.compile(r"(?i)(?<=bearer )[A-Za-z0-9._~+/\-]{16,}=*")),
     ("basic-auth-header", re.compile(r"(?i)(?<=basic )[A-Za-z0-9+/]{12,}={0,2}")),
 ]
@@ -43,6 +67,9 @@ CLI_ARG = re.compile(
     r"(?i)(--(?:password|passwd|pass|token|secret|api-key|apikey|auth-token|key)[= ])(\S+)"
     r"|(\s-u\s+[^:\s+%][^:\s]*:)(\S+)"  # not `date -u +%Y-%m-%dT%H:%M`
     r"|(\bmysql(?:dump)?\b[^\n]*?\s-p)(\S+)"
+    # HAProxy: userlist plain-text passwords and the stats page login
+    r"|(\binsecure-password\s+)(\S+)"
+    r"|(\bstats\s+auth\s+[^:\s]+:)(\S+)"
 )
 
 # Key names that hold secrets (matched against the key, not the value).
@@ -130,8 +157,14 @@ def _finding(kind, value, key=None):
         "key": key,
         "length": len(v),
         "fp": fingerprint(v),
+        "xfp": fleet_fingerprint(v),
         "weak": v.lower() in WEAK_VALUES or (key is not None and _is_password_key(key) and 0 < len(v) < 12),
     }
+
+
+def key_body_finding(body):
+    """A private-key finding fingerprinted by the key body (base64 lines joined), never by its header."""
+    return _finding("private-key", body or "<empty key body>")
 
 
 def _is_password_key(key):
@@ -145,7 +178,7 @@ def _redacted(value):
 # Detection only (lenient): values and keys that are ordinary code or metadata, never credentials.
 # Masking ignores these rules, so a line that matches them is still redacted in inventories.
 # shell expansions: $(cmd), `cmd`, a path built on a variable ("$DIR/.token")
-SHELL_EXPANSION = re.compile(r"^(?:\$\(|`|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/)")
+SHELL_EXPANSION = re.compile(r"^(?:\$\(|`|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/|\$[A-Za-z_]\w*::\w+$)")  # + $sect::name
 # fetch()/CORS options and status words
 NON_SECRET_WORDS = {"same-origin", "same_origin", "include", "omit", "unknown", "required", "optional",
                     "disabled", "enabled", "inherit", "unset", "empty", "hidden", "masked", "n/a"}
@@ -248,10 +281,11 @@ def scan_line(line: str, code: bool = False, lenient: bool = False, prose: bool 
     masked = URL_CREDS.sub(url_sub, masked)
 
     def cli_sub(m):
-        for pre_i, val_i in ((1, 2), (3, 4), (5, 6)):
+        for pre_i, val_i in ((1, 2), (3, 4), (5, 6), (7, 8), (9, 10)):
             if m.group(pre_i) is not None:
                 val = m.group(val_i)
-                if val.startswith("<REDACTED") or PLACEHOLDER.match(val) or _not_a_secret(val):
+                if val.startswith("<REDACTED") or PLACEHOLDER.match(val) or _not_a_secret(val) \
+                        or (lenient and SHELL_EXPANSION.match(val)):
                     return m.group(0)
                 findings.append(_finding("cli-argument", val))
                 return m.group(pre_i) + _redacted(val)
@@ -275,6 +309,9 @@ def scan_line(line: str, code: bool = False, lenient: bool = False, prose: bool 
         if lenient and len(val.split()) >= 3:
             return m.group(0)
         if lenient and (_ordinary_code(m, key, val) or _ui_text(key, val)):
+            return m.group(0)
+        # a commented-out default ("# input_password = secret") is an example, not this host's secret
+        if lenient and m.string.lstrip().startswith(("#", ";", "//")) and val.lower() in WEAK_VALUES:
             return m.group(0)
         if lenient and prose and not PROSE_PREFIX.match(m.string[:m.start("key")]):
             return m.group(0)

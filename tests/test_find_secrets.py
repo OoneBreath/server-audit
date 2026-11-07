@@ -120,6 +120,29 @@ class FindSecretsTest(unittest.TestCase):
 
 
 
+class PrivateKeysAndExamples(unittest.TestCase):
+    def test_keys_fingerprinted_by_body(self):
+        root = tempfile.mkdtemp(prefix="sa-keys-")
+        try:
+            body_a = ["QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ=="] * 3
+            body_b = ["QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQg=="] * 3
+            for name, body in (("a.key", body_a), ("b.key", body_b), ("a-copy.key", body_a)):
+                with open(os.path.join(root, name), "w") as f:
+                    f.write("-----BEGIN OPENSSH PRIVATE KEY-----\n%s\n-----END OPENSSH PRIVATE KEY-----\n"
+                            % "\n".join(body))
+            with open(os.path.join(root, "openssl.cnf"), "w") as f:
+                f.write("# input_password = secret\n# output_password = secret\nsecret = pass:insta\n"
+                        "secret = $insta::secret\n# DB_PASSWORD=Real1y-S3cret-v4lue\n")
+            out = subprocess.run([sys.executable, "-I", SCRIPT, root], stdout=subprocess.PIPE, text=True).stdout
+            self.assertIn("hits: 4", out)  # three keys + the real commented password
+            dup = out.split("values found in more than one place")[1]
+            self.assertIn("a.key", dup)
+            self.assertIn("a-copy.key", dup)
+            self.assertNotIn("b.key", dup)  # a different key is not "the same value"
+            self.assertNotIn("QUFB", out)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 class OwnOutputsAndProse(unittest.TestCase):
     def test_own_reports_skipped_while_walking_but_scanned_when_named(self):
         root = tempfile.mkdtemp(prefix="sa-own-")

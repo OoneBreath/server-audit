@@ -7,7 +7,7 @@ rate it, and the false positives that waste the operator's attention. Severity i
 Contents: 1 Exposure (ports, firewall, Docker, tunnels) · 2 Reverse proxy & web apps · 3 SSH · 4 Users & sudo ·
 5 Secrets · 6 Services & persistence · 7 Updates & kernel · 8 TLS · 9 Backups & recovery ·
 10 Detection & logging · 11 AI agents on the host · 12 Things the host cannot see · 13 Disk & log growth ·
-14 DNS & mail · 15 Drift and attack paths
+14 DNS & mail · 15 Drift and attack paths · 16 Several hosts
 
 ---
 
@@ -20,6 +20,12 @@ Rules that are true and routinely forgotten:
 - **Listening ≠ reachable ≠ safe.** Build a table per port: bind address (loopback / all / specific),
   firewall verdict, Docker DNAT yes/no, outside-in result. Only the outside-in result proves
   reachability; everything else is a hypothesis.
+- **Rootful Podman** publishes ports through netavark's iptables/nftables rules (DNAT), so ufw/firewalld INPUT
+  rules do not filter them, like Docker. **Rootless Podman** ports are opened by the user's own process
+  (`rootlessport`, `pasta`): the host firewall applies, but nothing in the system config says they exist —
+  check the quadlets (`~/.config/containers/systemd/*.container`) and the listener table. Users in
+  `/var/lib/systemd/linger` start their containers at boot without logging in. A stopped container is a
+  risk only when started: the inventory lists what it would publish, and the fix is usually `docker rm`.
 - **Docker publishes ports around ufw.** A `ports: "5432:5432"` mapping inserts DNAT rules in the
   nat table before ufw's INPUT chain ever sees the packet. `ufw status` showing "deny" means
   nothing for those ports. Evidence: `iptables -t nat -S DOCKER` DNAT lines without `-d 127.0.0.1`,
@@ -116,6 +122,32 @@ outside-in URL matrix.
 - Debug modes (Flask debug, Django DEBUG, Next.js dev server, Werkzeug console) reachable = HIGH.
 - A test/staging instance published on a throwaway hostname (e.g. `<ip>.sslip.io`, `nip.io`) is still
   public. Treat it like production: what data does it hold, does it need auth.
+
+**Traefik** (routers from the static file, CLI flags, file-provider configs and Docker labels; the
+inventory maps paths inside a Traefik container to the host files mounted there):
+- `api.insecure=true` serves the API and dashboard without auth on the `traefik` entrypoint (`:8080`):
+  every router, service and backend address. Reachable from the internet = MEDIUM (it is a map, not
+  control); verify the port outside-in.
+- A router for an admin-like host or path (or `service: api@internal`) whose middlewares contain no
+  `basicAuth`, `digestAuth`, `forwardAuth` or `ipAllowList` (also through a `chain`) = an admin panel with
+  only the app's own login. A middleware defined in a provider the host does not show (`sso@file` in a
+  file not found, another host's labels) is reported as unknown, not as missing.
+- Routers whose entrypoints all listen on `:80` with no TLS and no redirect = plain HTTP.
+- `exposedByDefault` not `false` in the Docker provider: every container on a shared network gets a router
+  under the default rule. A note, not a finding; ask whether `traefik.enable=false` is the habit.
+- Traefik with the Docker socket mounted (reported in DOCKER) is root on the host if Traefik is compromised:
+  prefer a socket proxy that allows only reads of containers.
+
+**HAProxy** (`/etc/haproxy/haproxy.cfg` and `conf.d`):
+- `stats socket` on an IP address (`ipv4@0.0.0.0:9999`, `:9999`) is the runtime API on the network: with
+  `level admin` anyone who reaches it disables servers and changes weights = HIGH if reachable from the
+  internet. A unix socket with `mode 666` is the same for local users.
+- A stats page (`stats enable`/`stats uri`) without `stats auth` or `http-request auth/deny` shows every
+  backend; with `stats admin` it also controls them.
+- `use_backend` for an admin-like path or host with no `http-request auth/deny` in that frontend.
+- `insecure-password` in a userlist is a plain-text password; a world-readable config with `stats auth` or
+  userlist passwords hands them to every local user.
+- `mode tcp` frontends get no HTTP checks: their exposure is in the listener table.
 
 ## 3. SSH
 
@@ -381,3 +413,21 @@ reach) → escalation (sudo rule, writable root job, docker group, leaked key) �
 backups). Rate the path by its end-to-end reachability × impact; a chain of MEDIUM/LOW findings can be one
 HIGH path. In the report, each path lists its findings by number; fixing any link breaks the path, so the
 fix plan should start with the cheapest link.
+
+## 16. Several hosts
+
+**Evidence:** `fleet.py compare` over the runs of every host (state.json, and secrets.txt made with the same
+comparison key).
+
+- **The same secret value on several hosts** (`xfp=` equal): one leak, one compromised host or one curious
+  agent opens all of them. MEDIUM, HIGH when it is a database or admin password reachable from outside.
+  Give each host its own value. A private key with the same body on several hosts is usually a cloned image
+  (SSH host keys: a man-in-the-middle can impersonate one host with another's key).
+- **The same SSH key authorized on several hosts:** expected for the operator's own key (with a passphrase,
+  ideally on a hardware token); a deploy or CI key on every host turns one leaked CI secret into the fleet.
+- **One host lagging** (more security updates, support ending, automatic updates or firewall off where the
+  others have them) is usually the forgotten one: the weakest host decides when the shared secrets leak.
+- **Ports open on some hosts only**: either a deliberate role (the mail server) or a service someone forgot.
+- **The same candidate on several hosts**: fix it once in the provisioning (image, Ansible, cloud-init),
+  not by hand on each host.
+

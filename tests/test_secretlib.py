@@ -138,6 +138,17 @@ class MaskTests(unittest.TestCase):
         masked, _ = secretlib.scan_line('"token_bucket": "Real1y-S3cret-bucket"')
         self.assertNotIn("Real1y-S3cret-bucket", masked)
 
+    def test_proxy_passwords(self):
+        self.assertMasked("    user admin insecure-password Fake-Pa55-value groups ops", "Fake-Pa55-value")
+        self.assertMasked("    stats auth ops:Fake-Pa55-value", "Fake-Pa55-value")
+        h = "$apr1$FAKEsalt$" + "a1B2c3D4e5F6g7H8i9J0kL"
+        masked, f = self.assertMasked('          - "admin:%s"' % h, h)
+        self.assertEqual(f[0]["type"], "apr1-hash")
+        self.assertEqual(secretlib.scan_line("    stats auth ops:<REDACTED>")[1], [])
+        self.assertEqual(secretlib.scan_line("user admin insecure-password $(cat /run/pw)", lenient=True)[1], [])
+        self.assertEqual(secretlib.scan_line("mysqldump --password=$(cat /root/.dbpw) shop", lenient=True)[1], [])
+        self.assertTrue(secretlib.scan_line("mysqldump --password=Real1y-S3cret shop", lenient=True)[1])
+
     def test_ui_strings_are_not_secrets(self):
         # translation and UI keys in app bundles (reported from a real audit: most of 1819 hits)
         cases = [('"forgot_password": "Forgot password?",', False),

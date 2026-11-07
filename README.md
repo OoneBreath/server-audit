@@ -13,7 +13,7 @@ tests, not by promises.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Runtime deps](https://img.shields.io/badge/runtime%20deps-zero-success)](#install)
 
-**v0.3.2** · Python 3 stdlib + bash · Ubuntu, Debian and the RHEL family · Caddy, nginx, Apache ·
+**v0.4.0** · Python 3 stdlib + bash · Ubuntu, Debian and the RHEL family · Caddy, nginx, Apache, Traefik, HAProxy ·
 tested end to end on two deliberately broken lab servers in CI · used on production VPSs since
 November 2026 ([CHANGELOG](CHANGELOG.md)).
 
@@ -56,12 +56,12 @@ It is **not**:
 | Area | What it looks at (examples) |
 |---|---|
 | Exposure | listeners vs firewall (ufw, firewalld, iptables) vs Docker DNAT (ports the firewall never sees), stale allow rules, no firewall at all, IPv6 vs IPv4, databases on public addresses, Cloudflare Tunnel / WireGuard / Tailscale |
-| Reverse proxy | Caddy and nginx: sites, locations that serve content without auth, admin paths, directory listing, HTTP-only sites, site blocks without DNS; Apache listing and status pages; `.git` inside web roots; CDN origin bypass |
+| Reverse proxy | Caddy and nginx: sites, locations that serve content without auth, admin paths, directory listing, HTTP-only sites, site blocks without DNS; Apache listing and status pages; Traefik routers from files, CLI flags and Docker labels (admin sites without an auth middleware, `api.insecure`, HTTP-only routers); HAProxy (runtime API on the network, stats page without auth, admin routes without auth, plain-text userlist passwords); `.git` inside web roots; CDN origin bypass |
 | SSH | effective sshd config and which drop-in wins, auth methods offered to the internet, authorized keys (fingerprints, options) |
 | Users & sudo | extra UID 0, empty passwords, sudo rules that are root in disguise, docker/lxd/disk groups, accounts that can log in but nobody uses |
 | Secrets | files, git history, shell history, agent transcripts and prompt history — where, how exposed, reused where; never the value |
 | Services & cron | root jobs running user-writable files, `Environment=` secrets readable through `systemctl show`, processes that die on reboot |
-| Docker | `--privileged`, Docker socket mounts, host network/PID, host paths mounted read-write, unpinned images, registry credentials, log rotation |
+| Containers | Docker and rootful Podman: `--privileged`, engine socket mounts, host network/PID, host paths mounted read-write, unpinned images, registry credentials, log rotation, stopped containers and what they would publish; Podman quadlets (rootful and rootless) and rootless ports |
 | Backups | ladder: exists → fresh → offsite → encrypted → safe from this host → restore-tested; can the key on the host delete the offsite copies, does the job mirror deletions offsite; do failures alert anyone; last status in the job's log |
 | Disk | filesystems and inodes near full, container logs without limits, journald |
 | Updates | pending security updates (apt, or dnf from its local cache), reboot required, unattended-upgrades / dnf-automatic, end of OS support |
@@ -70,6 +70,7 @@ It is **not**:
 | Detection & hardening | fail2ban, CrowdSec (and whether a bouncer blocks anything), auditd, AppArmor, SELinux mode, persistent journal, sysctl hardening |
 | AI agents | agents running on the host and their permission mode, transcripts, text on the host addressed to AI agents (injection attempts) |
 | Drift | every new account, key, listener, sudo rule, cron line, container, firewall rule or sshd setting since the last audit |
+| Several hosts | the same SSH key or secret value on several hosts, sshd and firewall differences, hosts lagging on updates or end of support, ports open on some hosts only, every backup ladder in one table (`fleet.py`) |
 
 What the host cannot see (domain and hosting renewal, provider snapshots, registrar 2FA, who else has
 access) becomes yes/no questions in the report. Details per area: [references/checks.md](references/checks.md).
@@ -106,7 +107,7 @@ like Ubuntu. Alpine/OpenRC and Podman hosts get a partial inventory (see [ROADMA
 
 Ask in plain words, in English or Polish: *"audit this server"*, *"what is exposed to the internet"*,
 *"is Docker bypassing ufw"*, *"are there secrets lying around on the box"*, *"check the auth on admin
-routes"*, *"audyt serwera"*, *"sprawdź bezpieczeństwo VPS"*. The skill also fits after an incident (leaked
+routes"*, *"compare my servers"*, *"audyt serwera"*, *"sprawdź bezpieczeństwo VPS"*. The skill also fits after an incident (leaked
 key, unexpected login, outage), to find what else is wrong.
 
 A run has eight steps:
@@ -130,6 +131,8 @@ A run has eight steps:
    restore test of the latest backup can be one of the approved fixes.
 8. **Record.** If the workspace keeps a project memory, the audit is saved there: findings, fixes,
    backup paths, open questions. No values, no fingerprints.
+
+With several hosts, each one is audited on its own, then `fleet.py` compares them on your machine.
 
 ## The scripts
 
@@ -230,6 +233,7 @@ python3 -I scripts/find_secrets.py ~/.server-audit/myrun/report.md     # leak ch
 | `--include-examples` | show hits in example and test files (hidden by default, counted) |
 | `--max-mb N` | skip larger files (default 5; transcripts 40×) |
 | `--out FILE` | write the report to FILE (mode 600) instead of stdout |
+| `--fleet-key-stdin` | read a comparison key from `fleet.py key` on stdin and add `xfp=` fingerprints that match across hosts |
 
 Each hit reports where the secret is and how exposed, never the value:
 
@@ -282,6 +286,31 @@ It reports:
 
 Run it from **another machine**. It refuses the addresses of the machine it runs on: traffic to
 your own public IP goes over loopback and skips the firewall, so every port would look open.
+
+### `fleet.py`: several hosts
+
+```bash
+python3 -I fleet.py key                    # a comparison key for this round, ~/.server-audit/fleet.key (600)
+ssh web-01 'sudo python3 -I find_secrets.py --git-history --fleet-key-stdin \
+    --out ~/.server-audit/RUN/secrets.txt' < ~/.server-audit/fleet.key        # repeat on every host
+# copy state.json and secrets.txt of each host's run into one directory per host (no values in either)
+python3 -I fleet.py compare runs/web-01 runs/web-02 runs/db-01 --out ~/.server-audit/fleet.txt
+python3 -I fleet.py key --delete
+```
+
+It runs on your machine and connects nowhere. It reports:
+- hosts at a glance: OS, end of support, pending security updates, reboot, automatic updates, firewall,
+  number of candidates;
+- hosts lagging behind the others (more security updates, support ending, no firewall or no automatic
+  updates where the others have them);
+- sshd settings that differ, and the same SSH key authorized on several hosts;
+- ports open on all interfaces on some hosts only;
+- every host's backup ladder in one table;
+- candidates shared by several hosts (fix once, everywhere);
+- the same secret value on several hosts. Per-run fingerprints are random on purpose, so this needs
+  the comparison key: it goes to each host over stdin, never into argv or a file there, and you delete
+  it after the comparison. While it exists, the `xfp=` values in the copied reports can be tested
+  against guessed passwords.
 
 ## Output
 

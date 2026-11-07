@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.0: several servers, Podman, Traefik, HAProxy
+
+Released 7 November 2026.
+
+- **`fleet.py`** compares the runs of several hosts on the operator's machine (it connects nowhere): hosts
+  at a glance (OS, end of support, pending security updates, reboot, automatic updates, firewall), hosts
+  lagging behind the others, sshd settings that differ, the same SSH key on several hosts, ports open on
+  some hosts only, every backup ladder in one table, candidates shared by several hosts.
+- **The same secret on several hosts**: `fleet.py key` makes a comparison key for one round;
+  `find_secrets.py --fleet-key-stdin` reads it on stdin (never argv, never a file on the host) and adds
+  `xfp=` fingerprints that match across hosts, plus the key's id so mixed keys are detected. Delete the
+  key after the comparison.
+- **Traefik**: routers from the static file, CLI flags (systemd or the container's args), the file provider
+  and Docker labels, with paths inside a Traefik container mapped to the host files mounted there. Flags
+  `api.insecure`, admin-like routers and the dashboard without an auth middleware (also through chains;
+  middlewares defined elsewhere count as unknown, not missing), routers on plain HTTP only.
+- **HAProxy**: the runtime API on the network (`stats socket` on an address, `level admin`), stats pages
+  without auth (and with `stats admin`), admin-like routes without `http-request auth/deny`, plain-HTTP
+  frontends, `insecure-password` in userlists, world-readable configs holding passwords.
+- **Podman**: rootful containers (ports on all interfaces, privileged, engine socket and host mounts,
+  stopped ones as stopped), the rootful API socket, quadlets rootful and rootless, rootless ports from the
+  listener table, users with linger. CI runs it against a real engine.
+- **Secrets**: HAProxy `insecure-password` and `stats auth`, `$apr1$` hashes (htpasswd, Traefik basicAuth).
+  Private keys are fingerprinted by their body, not their header: before, every key looked like the same
+  value in "values found in more than one place". Commented-out weak defaults (`# input_password =
+  secret`), config references (`$section::name`) and OpenSSL's CMP demo secret are no longer hits.
+- `state.json` has a `_fleet` section (end of support, security updates, reboot, automatic updates),
+  skipped by drift so moving counts are no noise.
+- Labs: Traefik in `lab/ubuntu`, HAProxy in `lab/rhel`; the end-to-end test compares both labs with
+  `fleet.py` and finds a secret planted on both.
+
 ## 0.3.2: fixes from a real audit
 
 Released 7 November 2026. Reported by an operator after a full audit of a production Ubuntu 22.04 host

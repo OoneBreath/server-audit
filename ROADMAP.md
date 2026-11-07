@@ -27,18 +27,24 @@ Ordered by what makes the audit useful on the most servers soonest. Versions are
 - [x] `diff_state.py --json --exit-code`, `collect.py --fail-on-drift` (nightly drift check without an
       agent), `findings.json` in the report format
 
-## v0.4: several servers
+## v0.4: several servers ✓
 
-- [ ] Compare the state of several hosts on the operator's machine: the same SSH key or secret on
-      several servers (needs a fingerprint key the operator holds, never stored on the hosts), firewall
-      and sshd differences, one host lagging on updates, all backups in one place
-- [ ] Podman (rootless containers, published ports, quadlets)
-- [ ] Traefik and HAProxy routes
+- [x] `fleet.py`: compare the state of several hosts on the operator's machine — the same SSH key or secret
+      on several servers (a comparison key the operator holds, passed on stdin, never stored on the
+      hosts), sshd and firewall differences, hosts lagging on updates, all backups in one table
+- [x] Podman (rootful containers, quadlets rootful and rootless, rootless ports, linger), CI job on a real
+      engine
+- [x] Traefik (static file, CLI flags, file provider, Docker labels) and HAProxy
+
+## v0.5: next
+
+- [ ] Kubernetes nodes (kubelet, etcd and API exposure from the node)
+- [ ] Caddy JSON config and Caddy behind Docker labels
+- [ ] A fleet run over SSH from the operator's machine (each host audited in turn, results collected)
 
 ## Later
 
 - [ ] Alpine/OpenRC and other non-systemd hosts beyond the partial inventory
-- [ ] Kubernetes nodes (kubelet, etcd and API exposure from the node)
 
 ## Not planned
 
