@@ -260,14 +260,14 @@ class JobsCertsReaders(unittest.TestCase):
         import tempfile
         d = tempfile.mkdtemp()
         try:
-            os.makedirs(os.path.join(d, "server-backup"))
-            for f in ("server-backup/backup.py", "run.sh"):
+            os.makedirs(os.path.join(d, "nightly-backup"))
+            for f in ("nightly-backup/backup.py", "run.sh"):
                 open(os.path.join(d, f), "w").write("#!/bin/sh\n")
-            app = os.path.join(d, "server-backup")
+            app = os.path.join(d, "nightly-backup")
             line = "30 3 * * * cd %s && flock -n /tmp/sb.lock python3 backup.py >> logs/cron.log 2>&1" % app
             self.assertIn(os.path.join(app, "backup.py"), collect.job_files(line))
             self.assertIn(os.path.join(app, "backup.py"),
-                          collect.job_files("cd ~/server-backup && python3 backup.py", home=d))
+                          collect.job_files("cd ~/nightly-backup && python3 backup.py", home=d))
             self.assertIn(os.path.join(d, "run.sh"), collect.job_files("@daily ./run.sh", home=d))
             self.assertIn(os.path.join(d, "run.sh"), collect.job_files("@daily bash $HOME/run.sh", home=d))
             self.assertEqual(collect.job_files("@daily python3 missing.py", home=d), set())

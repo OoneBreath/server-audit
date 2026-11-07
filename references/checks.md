@@ -328,7 +328,7 @@ code that reads secrets from the environment.
   after the next run, unless the destination keeps versions the host cannot purge. Use `copy`,
   `--backup-dir`, or dated snapshots (restic, borg).
 - **Before reporting "only on this host" or "alerts nobody", read the job.** The inventory follows the
-  script a cron line or timer runs one level deep, relative ones included (`cd ~/server-backup && python3
+  script a cron line or timer runs one level deep, relative ones included (`cd ~/backup && python3
   backup.py`, `./run.sh`, `$HOME/…`), plus config files next to it. A backup that a second script, a
   config elsewhere or a systemd unit's `EnvironmentFile` drives can still look local: open the script
   (`sed -n 1,80p`, never `cat` a config with credentials) before calling it a finding.

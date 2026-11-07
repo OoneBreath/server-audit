@@ -26,14 +26,14 @@ container reported as publishing a port) were already fixed in 0.3.2.
 - Labs: a PHP webmail under nginx with `.htaccess`-only protection (RHEL), a CDN edge stand-in that serves a
   cached 200 (Ubuntu).
 
-## 0.4.1: fixes from the server3 audit
+## 0.4.1: fixes from a field audit
 
-Released 7 November 2026. Reported after a v0.3.1 audit of a production Ubuntu 24.04 host, where the agent
+Released 7 November 2026. Reported after a v0.3.1 audit of a production host, where the agent
 had to drop three of the skill's candidates by hand.
 
-- **Backups run through a relative script were missed.** A crontab line such as `cd ~/server-backup &&
-  flock -n /tmp/sb.lock python3 backup.py` names no absolute script, so the inventory never read
-  `backup.py` (rclone to an encrypted Google Drive remote, mail on failure) and reported "backups exist
+- **Backups run through a relative script were missed.** A crontab line such as `cd ~/backup &&
+  flock -n /tmp/b.lock python3 backup.py` names no absolute script, so the inventory never read
+  `backup.py` (an offsite copy and an alert on failure) and reported "backups exist
   only on this host" and "failures alert nobody". Jobs now resolve scripts the way cron does: after `cd
   DIR`, and in the home of the user the line runs as (`./run.sh`, `~/…`, `$HOME/…`). The same applies to
   "root cron runs a script writable by non-root".

@@ -58,11 +58,11 @@ class CollectHelpers(unittest.TestCase):
         self.assertFalse(collect.sensitive_mount("/var/run/docker.sock", "rw"))  # reported on its own
 
     def test_rclone_and_status(self):
-        conf = "[gdrive]\ntype = drive\ntoken = {\"access_token\":\"x\"}\n\n[gbackup]\ntype = crypt\n" \
-               "remote = gdrive:server-backups\npassword = abc\n"
+        conf = "[gdrive]\ntype = drive\ntoken = {\"access_token\":\"x\"}\n\n[offsite]\ntype = crypt\n" \
+               "remote = gdrive:host-backups\npassword = abc\n"
         r = collect.rclone_remotes(conf)
         self.assertEqual([(x["name"], x["type"], x["remote"]) for x in r],
-                         [("gdrive", "drive", ""), ("gbackup", "crypt", "gdrive:server-backups")])
+                         [("gdrive", "drive", ""), ("offsite", "crypt", "gdrive:host-backups")])
         self.assertNotIn("abc", repr(r))
         self.assertNotIn("access_token", repr(r))
         log = "2026-11-01 OK: a.tar.gz\n2026-11-02 something else\n2026-11-03 FAILED: rclone exit 1\n"
@@ -71,13 +71,13 @@ class CollectHelpers(unittest.TestCase):
 
     def test_offsite_protection(self):
         remotes = [{"name": "gdrive", "type": "drive", "remote": ""},
-                   {"name": "gbackup", "type": "crypt", "remote": "gdrive:server-backups"},
+                   {"name": "offsite", "type": "crypt", "remote": "gdrive:host-backups"},
                    {"name": "bb", "type": "b2", "remote": ""}]
         # a crypt remote over Google Drive: the token deletes what it wrote; sync mirrors deletions
         v, reasons, checks, mirrors = collect.offsite_protection(
-            "rclone sync /srv/backups gbackup:host1\n", [remotes[1]], remotes, ["rclone"])
+            "rclone sync /srv/backups offsite:host1\n", [remotes[1]], remotes, ["rclone"])
         self.assertEqual(v, "yes")
-        self.assertIn("gbackup over gdrive (drive)", reasons[0])
+        self.assertIn("offsite over gdrive (drive)", reasons[0])
         self.assertEqual(mirrors, ["rclone sync"])
         # copy to a B2 bucket: depends on the key and the lifecycle rules; nothing mirrored
         v, reasons, checks, mirrors = collect.offsite_protection(
