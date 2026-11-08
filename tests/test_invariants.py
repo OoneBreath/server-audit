@@ -38,6 +38,7 @@ READ_ONLY = {
     ("ip", "-o"), ("docker", "image"), ("lastlog", None), ("df", None), ("journalctl", "--disk-usage"),
     ("du", "-sxk"), ("apachectl", "-S"), ("dnf", "-C"), ("needs-restarting", "-r"), ("firewall-cmd", "--state"),
     ("firewall-cmd", "--get-active-zones"), ("firewall-cmd", "--list-all"), ("getenforce", None), ("rpm", "-qf"), ("podman", "ps"), ("podman", "inspect"),
+    ("last", "-x"), ("journalctl", "-t"),
 }
 GIT_READ_ONLY = {"remote", "rev-parse", "ls-files"}
 

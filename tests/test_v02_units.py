@@ -73,7 +73,7 @@ class CollectHelpers(unittest.TestCase):
         remotes = [{"name": "gdrive", "type": "drive", "remote": ""},
                    {"name": "offsite", "type": "crypt", "remote": "gdrive:host-backups"},
                    {"name": "bb", "type": "b2", "remote": ""}]
-        # a crypt remote over Google Drive: the token deletes what it wrote; sync mirrors deletions
+        # a crypt remote over a cloud-drive remote (type drive): the token deletes what it wrote; sync mirrors deletions
         v, reasons, checks, mirrors = collect.offsite_protection(
             "rclone sync /srv/backups offsite:host1\n", [remotes[1]], remotes, ["rclone"])
         self.assertEqual(v, "yes")

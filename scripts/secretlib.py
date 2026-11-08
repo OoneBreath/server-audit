@@ -40,9 +40,11 @@ def fleet_fingerprint(value: str):
 TOKEN_PATTERNS = [
     # a real key header ends the line (PEM file) or is followed by an escaped newline (JSON service account)
     ("private-key", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----(?=\\n|\s*$)")),
-    ("anthropic-key", re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")),
-    ("openrouter-key", re.compile(r"sk-or-v1-[A-Za-z0-9]{32,}")),
-    ("openai-key", re.compile(r"sk-(?!ant-|or-)(?:proj-)?[A-Za-z0-9_\-]{32,}")),
+    # (?<![A-Za-z0-9]): "sk-" inside another vendor's key (ctx7sk-…) is not an OpenAI key
+    ("anthropic-key", re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_\-]{20,}")),
+    ("openrouter-key", re.compile(r"(?<![A-Za-z0-9])sk-or-v1-[A-Za-z0-9]{32,}")),
+    ("openai-key", re.compile(r"(?<![A-Za-z0-9])sk-(?!ant-|or-)(?:proj-)?[A-Za-z0-9_\-]{32,}")),
+    ("context7-key", re.compile(r"(?<![A-Za-z0-9])ctx7sk-[A-Za-z0-9_\-]{20,}")),
     ("stripe-live-key", re.compile(r"\b(?:sk|rk)_live_[A-Za-z0-9]{16,}")),
     ("stripe-test-key", re.compile(r"\b(?:sk|rk)_test_[A-Za-z0-9]{16,}")),
     ("stripe-webhook-secret", re.compile(r"\bwhsec_[A-Za-z0-9]{16,}")),
@@ -88,7 +90,9 @@ ASSIGN = re.compile(
     r"""(?P<pre>(?:^|[\s"'{,;(])(?:export\s+|Environment=["']?)?)"""
     r"""(?P<q1>["']?)(?P<key>[A-Za-z_][A-Za-z0-9_.\-]{1,80})(?P=q1)"""
     r"""(?P<sep>\s*[:=]\s*)"""
-    r"""(?P<q2>["']?)(?P<val>[^\s"'#,;}]+(?:[^\n"'#,;}]*[^\s"'#,;}])?)(?P=q2)"""
+    # words separated by horizontal blanks: the same values as "[^\s…]+(?:[^\n…]*[^\s…])?", but without
+    # two overlapping quantifiers — that form backtracked quadratically on long JSON transcript lines
+    r"""(?P<q2>["']?)(?P<val>[^\s"'#,;}]+(?:[^\S\n]+[^\s"'#,;}]+)*)(?P=q2)"""
 )
 
 WEAK_VALUES = {
@@ -273,7 +277,7 @@ def scan_line(line: str, code: bool = False, lenient: bool = False, prose: bool 
         masked = rx.sub(tok_sub(kind), masked)
 
     def url_sub(m):
-        if m.group(2).startswith("<REDACTED") or _not_a_secret(m.group(2)):
+        if "<REDACTED" in m.group(2) or _not_a_secret(m.group(2)):
             return m.group(0)
         findings.append(_finding("url-credentials", m.group(2)))
         return m.group(1) + _redacted(m.group(2)) + m.group(3)
@@ -284,7 +288,9 @@ def scan_line(line: str, code: bool = False, lenient: bool = False, prose: bool 
         for pre_i, val_i in ((1, 2), (3, 4), (5, 6), (7, 8), (9, 10)):
             if m.group(pre_i) is not None:
                 val = m.group(val_i)
-                if val.startswith("<REDACTED") or PLACEHOLDER.match(val) or _not_a_secret(val) \
+                # "<REDACTED" anywhere: a token pattern already masked (part of) it — masking the
+                # remainder again would nest the markers ("<REDACTED len=13 …> len=35 …>")
+                if "<REDACTED" in val or PLACEHOLDER.match(val) or _not_a_secret(val) \
                         or (lenient and SHELL_EXPANSION.match(val)):
                     return m.group(0)
                 findings.append(_finding("cli-argument", val))

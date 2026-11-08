@@ -23,7 +23,7 @@ def state(host, ssh_pw="no", sec=0, eol_days=900, offsite="rclone", key_fp="SHA2
         "_meta": {"host": host, "collected": "2026-11-07 10:00:00", "root": True},
         "_fleet": {"eol": "2029-05-31", "eol_days": eol_days, "security_updates": sec, "reboot_required": "no",
                    "auto_updates": "unattended-upgrades enabled"},
-        "host": {"os": "Ubuntu 24.04.5 LTS", "kernel": "6.8.0-147-generic"},
+        "host": {"os": "Ubuntu 24.04 LTS", "kernel": "6.8.0-100-generic"},
         "firewall": {"ufw_status": "active"},
         "ssh": {"effective": {"passwordauthentication": ssh_pw, "permitrootlogin": "no"},
                 "keys /home/ops/.ssh/authorized_keys": ["256 %s ops@laptop (ED25519)" % key_fp]},

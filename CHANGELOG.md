@@ -1,8 +1,61 @@
 # Changelog
 
+## 0.4.3: missed backups, a faster secret scan, less noise
+
+Released 8 November 2026. From a field audit of a single-operator host (root, Caddy, an rclone offsite
+backup), where every candidate was checked by hand.
+
+- **A missed backup run is reported.** When the host is off at backup time the job never starts: no error,
+  no failure mail, and a staleness check that fires after 36 h sees nothing once the next night succeeds.
+  The inventory now reads each backup log's success lines, learns the usual interval (the median gap) and
+  reports gaps longer than 1.5 times that interval in the last 45 days ("a missed backup run went
+  unnoticed"), with the downtime from `last -x` that explains the gap.
+- **Shutdowns that came from outside the guest** (`systemd-logind: System is powering down (hypervisor
+  initiated shutdown)`, `qemu-ga: guest-shutdown called`, an ACPI power-button event) are an availability
+  event of their own, with the time the host came back; downtimes of an hour or more are listed in HOST.
+- **The secret scan is several times faster.** The assignment pattern backtracked quadratically on a quoted
+  value that never meets its closing quote (base64 in a long transcript line): seconds per line, most of the
+  run on a host with large agent transcripts. It is rewritten to match the same values in linear time (a
+  regression test keeps it there). On a test host the full scan (`--git-history --transcripts`) went from
+  401 s to 83 s with the same findings.
+- **Package caches, SDKs and editor servers are skipped by default**: `~/.pub-cache`, `~/.gradle`, `~/.m2`,
+  `~/.cargo/registry`, Flutter and Android SDKs (recognised by their contents, so a project called `flutter`
+  is still scanned), `~/.vscode-server`, `~/.cursor-server`, `~/.windsurf-server` and similar. In the field
+  audit they produced over 90% of the 3800 hits. The credential files next to them stay in the scan
+  (`~/.pub-cache/credentials.json`, `~/.gradle/gradle.properties`, `~/.m2/settings.xml`,
+  `~/.cargo/credentials.toml`); `--include-caches` scans everything, and a cache named on the command line is
+  scanned.
+- find_secrets: progress on stderr (`scanning <root> (n/N)…`, a heartbeat every 15 s, the git history of each
+  repo, `done in N s`; `--quiet` turns it off), `--max-seconds N` (a partial report that says what was not
+  scanned), `--since 30d` (recent transcripts and agent histories only). SKILL.md: run the scan in the
+  background.
+- **Fewer false OpenAI keys, no nested masks.** `sk-` inside a longer word (`…disk-…`, another vendor's
+  `ctx7sk-…`) is no longer an OpenAI key; a Context7 key has its own type. A value already partly masked is
+  not masked again, so lines no longer read `<REDACTED len=13 …> len=35 …>`.
+- **Root-run paths writable only by passwordless sudoers are one INFO note.** When every account that can
+  write a root service's script or directory (or a root cron target) already has `NOPASSWD: ALL`, that is no
+  escalation path; the paths are listed in one `note (INFO)` line instead of one candidate each.
+- **A web-facing app running as root** (gunicorn, uvicorn, node, java, php, … on a public address or behind
+  the reverse proxy) is its own candidate: a remote-code-execution bug in it is root on the host.
+- **World-readable databases and dumps are one line.** With no one but root and the operator logging in
+  (login shells with uid ≥ 1000), it is a `note (LOW)` naming the service accounts that can still read them.
+- **Stale sudo rules**: a rule for a user or group that does not exist is reported as LOW ("would grant its
+  rights to whoever creates that account later — delete the rule"), no longer as root-equivalent.
+- **ufw rules for a Docker bridge subnet** on a host without Docker say so ("Docker is not installed —
+  nothing uses this rule, delete it").
+- **Partial runs**: `--only firewall` no longer reports every ufw rule as stale (the listener table is now
+  collected quietly first); `services`, `cron` and `web` also collect what they depend on.
+- **Drift**: one header line that names the baseline (`Changes since <run> (collected …) — N`), instead of a
+  header plus a separate baseline line.
+- **Container labels and arguments are masked when read.** Traefik's Docker labels and container arguments
+  were read unmasked (masking would break their JSON) and parsed as is; every value is now masked right after
+  parsing, and Podman's container fields too. A test feeds secret-bearing labels and arguments through the
+  Traefik section and checks that none reaches the inventory or the state.
+- Labs: a sudo rule for a deleted account (Ubuntu), an offsite log with a missed night (RHEL).
+
 ## 0.4.2: Caddy wildcards, .htaccess, CDN caches, steady drift
 
-Released 7 November 2026. From the written feedback of a v0.3.1 audit of a production Ubuntu 22.04 host.
+Released 7 November 2026. From the written feedback of a v0.3.1 audit of a production host.
 Its first four points (translation keys and prose read as secrets, `fail=0` read as a failure, a stopped
 container reported as publishing a port) were already fixed in 0.3.2.
 
@@ -11,7 +64,7 @@ container reported as publishing a port) were already fixed in 0.3.2.
   state (older baselines are cleaned when read); secrets are compared by key name and length. A stable
   per-host salt was not used on purpose: a key kept next to the fingerprints makes them testable offline
   with guessed passwords.
-- **Caddy path patterns with a `*` inside** (new candidate). Tested on Caddy 2.11.7: such a pattern is a
+- **Caddy path patterns with a `*` inside** (new candidate). Tested on Caddy 2.11: such a pattern is a
   glob where every `*` matches one path segment, so `/a/*/b/*` matches `/a/x/b/y` but not `/a/x/b/y/z`. An
   auth rule written that way passes a shallow test and leaves deeper paths open. Patterns that also end in
   `*` are candidates; the REST shape `/items/*/verify` is a note.
@@ -78,7 +131,7 @@ Released 7 November 2026.
 
 ## 0.3.2: fixes from a real audit
 
-Released 7 November 2026. Reported by an operator after a full audit of a production Ubuntu 22.04 host
+Released 7 November 2026. Reported by an operator after a full audit of a production host
 (1819 secret-scan hits, mostly noise).
 
 - **find_secrets on web apps**: translation and UI strings are no longer secrets (`"forgot_password":

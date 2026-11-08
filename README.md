@@ -13,7 +13,7 @@ tests, not by promises.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Runtime deps](https://img.shields.io/badge/runtime%20deps-zero-success)](#install)
 
-**v0.4.2** · Python 3 stdlib + bash · Ubuntu, Debian and the RHEL family · Caddy, nginx, Apache, Traefik, HAProxy ·
+**v0.4.3** · Python 3 stdlib + bash · Ubuntu, Debian and the RHEL family · Caddy, nginx, Apache, Traefik, HAProxy ·
 tested end to end on two deliberately broken lab servers in CI · used on production VPSs since
 November 2026 ([CHANGELOG](CHANGELOG.md)).
 
@@ -58,12 +58,13 @@ It is **not**:
 | Exposure | listeners vs firewall (ufw, firewalld, iptables) vs Docker DNAT (ports the firewall never sees), stale allow rules, no firewall at all, IPv6 vs IPv4, databases on public addresses, Cloudflare Tunnel / WireGuard / Tailscale |
 | Reverse proxy | Caddy and nginx: sites, locations that serve content without auth, admin paths, directory listing, HTTP-only sites, site blocks without DNS, Caddy path patterns with a `*` inside (one segment per `*`), PHP directories protected only by `.htaccess` (ignored by Caddy and nginx); Apache listing and status pages; Traefik routers from files, CLI flags and Docker labels (admin sites without an auth middleware, `api.insecure`, HTTP-only routers); HAProxy (runtime API on the network, stats page without auth, admin routes without auth, plain-text userlist passwords); `.git` inside web roots; CDN origin bypass and answers served from a CDN cache |
 | SSH | effective sshd config and which drop-in wins, auth methods offered to the internet, authorized keys (fingerprints, options) |
-| Users & sudo | extra UID 0, empty passwords, sudo rules that are root in disguise, docker/lxd/disk groups, accounts that can log in but nobody uses |
-| Secrets | files, git history, shell history, agent transcripts and prompt history — where, how exposed, reused where; never the value |
-| Services & cron | root jobs running user-writable files, `Environment=` secrets readable through `systemctl show`, processes that die on reboot |
+| Users & sudo | extra UID 0, empty passwords, sudo rules that are root in disguise, sudo rules for accounts that no longer exist, docker/lxd/disk groups, accounts that can log in but nobody uses |
+| Secrets | files, git history, shell history, agent transcripts and prompt history — where, how exposed, reused where; never the value. Package caches and SDKs skipped (the credential files beside them kept); progress, time limit |
+| Services & cron | root jobs running user-writable files (one note when only passwordless sudoers can write them), web-facing apps running as root, `Environment=` secrets readable through `systemctl show`, processes that die on reboot |
 | Containers | Docker and rootful Podman: `--privileged`, engine socket mounts, host network/PID, host paths mounted read-write, unpinned images, registry credentials, log rotation, stopped containers and what they would publish; Podman quadlets (rootful and rootless) and rootless ports |
-| Backups | ladder: exists → fresh → offsite → encrypted → safe from this host → restore-tested; can the key on the host delete the offsite copies, does the job mirror deletions offsite; do failures alert anyone; last status in the job's log |
+| Backups | missed runs (gaps between successes in the job's log, with the downtime behind them); ladder: exists → fresh → offsite → encrypted → safe from this host → restore-tested; can the key on the host delete the offsite copies, does the job mirror deletions offsite; do failures alert anyone; last status in the job's log |
 | Disk | filesystems and inodes near full, container logs without limits, journald |
+| Availability | downtimes from `last -x`, shutdowns that came from the hypervisor or a power button |
 | Updates | pending security updates (apt, or dnf from its local cache), reboot required, unattended-upgrades / dnf-automatic, end of OS support |
 | TLS | expiry from local stores; versions, HSTS and certificates from outside |
 | DNS & mail | names that do not resolve, dangling CNAMEs, CDN names publishing the origin, SPF, DMARC, DKIM, CAA, DNSSEC |
@@ -99,7 +100,7 @@ there too.
 root it still runs and marks the degraded sections. **Probe machine:** bash, curl, openssl (no nmap).
 **DNS check:** `dig`, from any machine.
 
-Used on Ubuntu 24.04 production hosts (ufw, Docker, Caddy, fail2ban, CrowdSec) and tested end to end
+Used on production hosts (ufw, Docker, Caddy, fail2ban, CrowdSec) and tested end to end
 in CI on two lab containers: Ubuntu 24.04 and AlmaLinux 9 with nginx and firewalld. Debian behaves
 like Ubuntu. Alpine/OpenRC and Podman hosts get a partial inventory (see [ROADMAP](ROADMAP.md)).
 

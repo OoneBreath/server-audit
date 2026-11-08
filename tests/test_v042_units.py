@@ -66,7 +66,7 @@ class CaddyWildcards(unittest.TestCase):
         self.assertEqual(got, ["/api/*/admin/*", "/t/*/settings", "/x/*/y", "/d/*/x"])
 
     def test_examples_match_caddy_behaviour(self):
-        # observed on Caddy 2.11.7: /a/*/b/* matches /a/x/b/y, not /a/x/b/y/z; /x/*/y not /x/x/y/y
+        # observed on Caddy 2.11: /a/*/b/* matches /a/x/b/y, not /a/x/b/y/z; /x/*/y not /x/x/y/y
         self.assertEqual(collect.wildcard_examples("/a/*/b/*"), ("/a/x/b/x", "/a/x/b/x/y"))
         self.assertEqual(collect.wildcard_examples("/x/*/y"), ("/x/x/y", "/x/x/y/y"))
 

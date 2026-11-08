@@ -19,6 +19,7 @@ import datetime
 from datetime import timezone
 import glob
 import grp
+import ipaddress
 import json
 import os
 import pwd
@@ -177,6 +178,51 @@ def writable_by_non_root(path):
 
 
 world_accessible = secretlib.world_accessible
+ROOT_PATHS_BY_SUDOERS = []  # (what, path, writers): writable only by accounts that already have root via sudo
+
+
+def path_writers(path):
+    """Accounts that can modify path: the owner (unless root), members of a writable group, or "*" (anyone)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return set()
+    m = stat.S_IMODE(st.st_mode)
+    if m & stat.S_IWOTH:
+        return {"*"}
+    out = set()
+    if st.st_uid != 0:
+        try:
+            out.add(pwd.getpwuid(st.st_uid).pw_name)
+        except KeyError:
+            out.add(str(st.st_uid))
+    if m & stat.S_IWGRP and st.st_gid != 0:
+        try:
+            out |= group_members(grp.getgrgid(st.st_gid).gr_name) or {"%%%d" % st.st_gid}
+        except KeyError:
+            out.add("%%%d" % st.st_gid)
+    return out
+
+
+def root_path_writable(what, path, section, text):
+    """Flag a root-run path that a non-root account can change — unless every such account already becomes
+    root without a password (then it is no escalation; one INFO note lists them all)."""
+    w = path_writers(path)
+    if w and "*" not in w and w <= SUDO_ROOT:
+        if not any(x[:2] == (what, path) for x in ROOT_PATHS_BY_SUDOERS):
+            ROOT_PATHS_BY_SUDOERS.append((what, path, w))
+        return
+    flag(section, text)
+
+
+def root_paths_note():
+    if ROOT_PATHS_BY_SUDOERS:
+        who = sorted({u for _, _, w in ROOT_PATHS_BY_SUDOERS for u in w})
+        items = ["%s (%s)" % (what, p) for what, p, _ in ROOT_PATHS_BY_SUDOERS]
+        emit("  note (INFO): %d root-run path(s) are writable only by %s, who already %s root via passwordless "
+             "sudo — not an escalation path: %s%s" % (len(items), ", ".join(who), "has" if len(who) == 1 else "have",
+                                                       "; ".join(items[:6]), " …" if len(items) > 6 else ""))
+        del ROOT_PATHS_BY_SUDOERS[:]
 
 
 def secret_count(path, limit=1_000_000):
@@ -267,6 +313,141 @@ def os_eol(os_release_text, today=None):
 
 
 # ---------------------------------------------------------------- sections
+MONTHS = {m: i for i, m in enumerate(("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+                                       "Dec"), 1)}
+ISO_TS = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?")
+TEXT_TS = re.compile(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})"
+                     r"(?:\s+[A-Z]{2,5})?(?:\s+(\d{4}))?")
+
+
+def line_time(line, now=None):
+    """The first timestamp in a log line (ISO, syslog "Nov  3 03:00:01", `date` "Mon Nov  3 03:00:01 UTC 2026"),
+    as a naive datetime; syslog lines without a year get the most recent year that is not in the future."""
+    now = now or datetime.datetime.now()
+    m = ISO_TS.search(line)
+    try:
+        if m:
+            y, mo, d, h, mi, sec = m.groups()
+            return datetime.datetime(int(y), int(mo), int(d), int(h), int(mi), int(sec or 0))
+        m = TEXT_TS.search(line)
+        if m:
+            mon, d, h, mi, sec, y = m.groups()
+            t = datetime.datetime(int(y) if y else now.year, MONTHS[mon], int(d), int(h), int(mi), int(sec))
+            if not y and t > now + datetime.timedelta(days=1):
+                t = t.replace(year=t.year - 1)
+            return t
+    except ValueError:
+        return None
+    return None
+
+
+SUCCESS_RX = re.compile(r"(?i)\b(ok|success(?:ful(?:ly)?)?|succeeded|completed?|done|finished)\b")
+
+
+def success_runs(text, now=None):
+    """Times of successful runs in a backup log (success lines within an hour count as one run)."""
+    times = sorted(t for t in (line_time(l, now) for l in text.splitlines()
+                               if SUCCESS_RX.search(l) and not status_problem(l)) if t)
+    runs = []
+    for t in times:
+        if not runs or (t - runs[-1]).total_seconds() > 3600:
+            runs.append(t)
+    return runs
+
+
+def missed_runs(runs, now=None, window_days=45):
+    """(gaps, interval): gaps between successes longer than 1.5x the usual interval (the median gap),
+    as [(last success before, next success, runs missed)], within the last window_days."""
+    now = now or datetime.datetime.now()
+    if len(runs) < 4:
+        return [], None
+    gaps = sorted((b - a).total_seconds() for a, b in zip(runs, runs[1:]))
+    usual = gaps[len(gaps) // 2]
+    if usual < 600:
+        return [], usual
+    out = []
+    for a, b in zip(runs, runs[1:]):
+        g = (b - a).total_seconds()
+        if g > 1.5 * usual and (now - b).days <= window_days:
+            out.append((a, b, max(1, int(round(g / usual)) - 1)))
+    return out, usual
+
+
+LAST_TS = r"[A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}"
+
+
+def parse_downtimes(last_x):
+    """[(down, up)] from `last -x -F` shutdown records: when the host went down and came back."""
+    out = []
+    for l in last_x.splitlines():
+        m = re.match(r"^shutdown\s+system down\s+\S+\s+(%s)\s+-\s+(%s)" % (LAST_TS, LAST_TS), l)
+        if m:
+            try:
+                out.append(tuple(datetime.datetime.strptime(re.sub(r"\s+", " ", x), "%a %b %d %H:%M:%S %Y")
+                                 for x in m.groups()))
+            except ValueError:
+                continue
+    return sorted(set(out))
+
+
+# shutdowns that came from outside the guest: the hypervisor / provider panel / ACPI power button
+OUTSIDE_SHUTDOWN = re.compile(r"(?i)hypervisor initiated shutdown|shutdown request from (?:the )?hypervisor|"
+                              r"guest-shutdown called|power key pressed|power button pressed|"
+                              r"received acpi (?:shutdown|power)")
+_DOWNTIMES = []
+
+
+def downtimes():
+    """Shutdown -> boot intervals from wtmp (current and rotated), computed once."""
+    if not _DOWNTIMES:
+        text = ""
+        for f in ("/var/log/wtmp", "/var/log/wtmp.1"):
+            if os.path.isfile(f):
+                rc, t = run(["last", "-x", "-F", "-f", f, "shutdown", "reboot"], mask=False)
+                text += t + "\n" if rc == 0 else ""
+        _DOWNTIMES.append(parse_downtimes(text))
+    return _DOWNTIMES[0]
+
+
+def outside_shutdowns(text):
+    """[(time, line)] for log lines saying the shutdown came from the hypervisor or a power button."""
+    out = []
+    for l in text.splitlines():
+        if OUTSIDE_SHUTDOWN.search(l):
+            t = line_time(l)
+            if t and not any(abs((t - x).total_seconds()) < 600 for x, _ in out):
+                out.append((t, re.sub(r"\s+", " ", l.strip())[:160]))
+    return out
+
+
+def availability_events():
+    """Downtimes in the last 60 days, and shutdowns that came from outside the guest (own availability event:
+    the provider or someone with the provider account stopped the machine)."""
+    now = datetime.datetime.now()
+    recent = [(d, u) for d, u in downtimes() if (now - u).days <= 60]
+    for d, u in recent:
+        h = (u - d).total_seconds() / 3600
+        if h >= 1:
+            emit("downtime: %s → %s (%.1f h)" % (d.strftime("%Y-%m-%d %H:%M"), u.strftime("%Y-%m-%d %H:%M"), h))
+    text = ""
+    for cmd in (["journalctl", "-u", "systemd-logind", "--since", "60 days ago", "-o", "short-iso", "-q", "--no-pager"],
+                ["journalctl", "-t", "qemu-ga", "--since", "60 days ago", "-o", "short-iso", "-q", "--no-pager"]):
+        rc, t = run(cmd, timeout=60)
+        text += t + "\n" if rc == 0 else ""
+    if not OUTSIDE_SHUTDOWN.search(text):  # a volatile journal loses the shutdown with the reboot: syslog keeps it
+        for f in ("/var/log/syslog", "/var/log/syslog.1", "/var/log/messages", "/var/log/messages.1"):
+            text += (read(f, 20_000_000) or "") + "\n"
+    for t, line in outside_shutdowns(text):
+        if (now - t).days > 60:
+            continue
+        up = next((u for d, u in recent if d >= t - datetime.timedelta(minutes=10) and u >= t), None)
+        flag("host", "the host was shut down from outside at %s (hypervisor / provider / power button)%s — ask the "
+             "provider why (maintenance, host failure, unpaid invoice) and check that an external uptime monitor "
+             "noticed; log: %s" % (t.strftime("%Y-%m-%d %H:%M"), ", back up at %s (%.1f h down)"
+                                   % (up.strftime("%Y-%m-%d %H:%M"), (up - t).total_seconds() / 3600) if up else "",
+                                   secretlib.mask(line)))
+
+
 def sec_host():
     header("HOST")
     emit("collected: %s UTC on %s, as %s%s" % (
@@ -279,6 +460,8 @@ def sec_host():
     state("host", "hostname", socket.gethostname())
     state("host", "os", m.group(1) if m else "unknown")
     state("host", "kernel", os.uname().release)
+    if IS_ROOT:
+        availability_events()
     oid, ver, eol, days = os_eol(osr)
     # facts for comparing hosts (fleet.py); "_" sections are skipped by drift, so counts that move are no noise
     state("_fleet", "eol", eol)
@@ -523,6 +706,24 @@ def firewalld_report():
     return True
 
 
+def docker_installed():
+    return have("docker") or have("dockerd") or os.path.exists("/var/run/docker.sock") \
+        or os.path.isdir("/var/lib/docker")
+
+
+def docker_subnet_note(src):
+    """Rules for 172.16.0.0/12 sources usually let containers reach a host service (mail, a DB)."""
+    try:
+        net = ipaddress.ip_network(src, strict=False)
+    except ValueError:
+        return ""
+    if net.version != 4 or not net.subnet_of(ipaddress.ip_network("172.16.0.0/12")):
+        return ""
+    if docker_installed():
+        return " (the source is a Docker bridge subnet)"
+    return "; the source is a Docker bridge subnet and Docker is not installed — nothing uses this rule, delete it"
+
+
 def sec_firewall():
     header("FIREWALL")
     if need_root("firewall"):
@@ -538,12 +739,13 @@ def sec_firewall():
         public_tcp = {p for pr, a, p, n, _, k in LISTEN if pr == "tcp" and k != "loopback"}
         stale = []
         for l in out.splitlines():
-            m = re.match(r"^(\d+)(/tcp)?(\s+\(v6\))?\s+ALLOW(?: IN)?\s+(\S+)", l)
+            m = re.match(r"^(\d+)(/tcp)?(\s+\(v6\))?(?:\s+on\s+\S+)?\s+ALLOW(?: IN)?\s+(\S+)", l)
             if m and m.group(1) not in public_tcp:
-                stale.append("%s from %s" % (m.group(1), m.group(4)))
-        for st_ in sorted(set(stale)):
-            flag("firewall", "ufw allows port %s but nothing listens there on a public address — stale rule "
-                 "(it will expose whatever binds to that port next)" % st_)
+                stale.append((m.group(1), m.group(4)))
+        if LISTEN:  # without the listener table (not root, ss missing) every rule would look stale
+            for port, src in sorted(set(stale), key=lambda x: (int(x[0]), x[1])):
+                flag("firewall", "ufw allows port %s from %s but nothing listens there on a public address — stale "
+                     "rule (it will expose whatever binds to that port next)%s" % (port, src, docker_subnet_note(src)))
         d = read("/etc/default/ufw") or ""
         m = re.search(r"^IPV6=(\w+)", d, re.M)
         emit("/etc/default/ufw IPV6=%s" % (m.group(1) if m else "?"))
@@ -760,8 +962,9 @@ def podman_containers(js):
             ports.append((p.get("host_ip") or "", str(hp) + ("-%d" % (int(hp) + n - 1) if n > 1 and hp else ""),
                           str(p.get("container_port", "")), p.get("protocol", "tcp")))
         state_ = str(c.get("State", "")).lower()
-        out.append({"name": names[0], "image": c.get("Image", "?"), "running": state_ in ("running", "paused"),
-                    "status": c.get("Status") or state_ or "?", "ports": ports})
+        out.append({"name": secretlib.mask(str(names[0])), "image": secretlib.mask(str(c.get("Image", "?"))),
+                    "running": state_ in ("running", "paused"),
+                    "status": secretlib.mask(str(c.get("Status") or state_ or "?")), "ports": ports})
     return out
 
 
@@ -994,6 +1197,72 @@ def sec_ssh():
 
 
 SUDO_RULES = []
+SUDO_ROOT = set()  # accounts that already become root without a password (NOPASSWD: ALL, directly or by group)
+
+
+def sudo_subjects(who):
+    """[(name, kind, exists)] for the user list of a sudoers rule: "alice", "%admins", "bob,%ops"."""
+    out = []
+    for w in who.split(","):
+        w = w.strip()
+        if not w or w == "ALL" or w.startswith(("#", "+")) or re.match(r"^[A-Z][A-Z0-9_]*$", w):
+            continue  # uid literals, netgroups and User_Alias names are not checked
+        if w.startswith("%"):
+            name = w[1:].lstrip(":")
+            try:
+                grp.getgrnam(name)
+                out.append((name, "group", True))
+            except KeyError:
+                out.append((name, "group", False))
+        else:
+            try:
+                pwd.getpwnam(w)
+                out.append((w, "user", True))
+            except KeyError:
+                out.append((w, "user", False))
+    return out
+
+
+def check_sudo_rule(fname, s):
+    """Flag one sudoers rule line; record who already becomes root without a password (SUDO_ROOT)."""
+    m = re.match(r"^(\S+)\s+\S+=\s*\(([^)]*)\)\s*(.*)$", s)
+    if not m:
+        return
+    subjects = sudo_subjects(m.group(1))
+    missing = [("%" if k == "group" else "") + n for n, k, ok in subjects if not ok]
+    if missing and len(missing) == len(subjects):
+        # nobody holds it today; it hands its rights to whoever later gets that name
+        flag("users", "stale sudo rule for a non-existent %s %s (%s) — it would grant its rights to whoever "
+             "creates that account later; delete the rule (LOW)"
+             % ("group" if subjects[0][1] == "group" else "user", ", ".join(missing), fname))
+        return
+    if "NOPASSWD" not in s:
+        return
+    who, runas, cmds = m.group(1), m.group(2), m.group(3).replace("NOPASSWD:", "")
+    if re.split(r"[\s,]+", cmds.strip())[0:1] == ["ALL"] and runas.split(":")[0] in ("root", "ALL", ""):
+        for n, k, ok in subjects:
+            SUDO_ROOT.update(group_members(n) if k == "group" else {n})
+    if who in ("root",) or who.startswith("%sudo") or who.startswith("%admin"):
+        return
+    for c in [c.strip() for c in cmds.split(",") if c.strip()]:
+        parts = c.split()
+        binary = os.path.basename(parts[0])
+        exact_args = len(parts) > 1 and "*" not in c
+        if binary in SHELL_ESCAPE_BINS and not exact_args:
+            target = "root" if runas.split(":")[0] in ("root", "ALL", "") else runas
+            what = ("passwordless full sudo — any process running as %s can become root" % who
+                    if binary == "ALL" else
+                    "sudo rule lets %s run `%s` as %s without password — it can spawn a shell / is "
+                    "root-equivalent" % (who, c, target))
+            flag("users", "%s (%s)" % (what, fname))
+
+
+def group_members(name):
+    try:
+        g = grp.getgrnam(name)
+    except KeyError:
+        return set()
+    return set(g.gr_mem) | {p.pw_name for p in pwd.getpwall() if p.pw_gid == g.gr_gid}
 
 
 def parse_lastlog(text, now=None):
@@ -1075,23 +1344,7 @@ def sec_users():
                     continue
                 emit("  sudo rule %s: %s" % (os.path.basename(f), secretlib.mask(s)))
                 SUDO_RULES.append("%s: %s" % (os.path.basename(f), stable(s)))
-                m = re.match(r"^(\S+)\s+\S+=\s*\(([^)]*)\)\s*(.*)$", s)
-                if not m or "NOPASSWD" not in s:
-                    continue
-                who, runas, cmds = m.group(1), m.group(2), m.group(3).replace("NOPASSWD:", "")
-                if who in ("root",) or who.startswith("%sudo") or who.startswith("%admin"):
-                    continue
-                for c in [c.strip() for c in cmds.split(",") if c.strip()]:
-                    parts = c.split()
-                    binary = os.path.basename(parts[0])
-                    exact_args = len(parts) > 1 and "*" not in c
-                    if binary in SHELL_ESCAPE_BINS and not exact_args:
-                        target = "root" if runas.split(":")[0] in ("root", "ALL", "") else runas
-                        what = ("passwordless full sudo — any process running as %s can become root" % who
-                                if binary == "ALL" else
-                                "sudo rule lets %s run `%s` as %s without password — it can spawn a shell / is "
-                                "root-equivalent" % (who, c, target))
-                        flag("users", "%s (%s)" % (what, os.path.basename(f)))
+                check_sudo_rule(os.path.basename(f), s)
         for f in sorted(glob.glob("/etc/sudoers.d/*")):
             if writable_by_non_root(f):
                 flag("users", "%s writable by a non-root user" % f)
@@ -1183,12 +1436,14 @@ def sec_services():
                     if target and target not in ("/usr/bin", "/usr/sbin", "/bin", "/sbin") \
                             and writable_by_non_root(target):
                         st = os.stat(target)
-                        flag("services", "%s runs as root but %s is writable by non-root (%s %s)"
-                             % (props.get("Id"), target, mode_str(st), owner_str(st)))
+                        root_path_writable(props.get("Id"), target, "services",
+                                           "%s runs as root but %s is writable by non-root (%s %s)"
+                                           % (props.get("Id"), target, mode_str(st), owner_str(st)))
                         hits += 1
                         break
         if not hits:
             emit("  none found")
+        root_paths_note()
 
     emit("")
     emit("listeners not managed by systemd (die on reboot):")
@@ -1252,9 +1507,10 @@ def sec_cron():
                 for tok in sorted(job_files(" ".join(cmd), CRON_HOME.get(l))):
                     if writable_by_non_root(tok):
                         st2 = os.stat(tok)
-                        flag("cron", "root cron runs %s which is writable by non-root (%s %s)"
-                             % (tok, mode_str(st2), owner_str(st2)))
+                        root_path_writable("root cron", tok, "cron", "root cron runs %s which is writable by "
+                                           "non-root (%s %s)" % (tok, mode_str(st2), owner_str(st2)))
                         break
+    root_paths_note()
     rc, tm = show(["systemctl", "list-timers", "--all", "--no-legend", "--no-pager"], limit=60)
     state("cron", "lines", CRON_STATE)
     state("cron", "timers", {m.group(1) for m in re.finditer(r"(\S+\.timer)\s", tm)})
@@ -1740,6 +1996,13 @@ def traefik_report(static, flats):
     state("web", "traefik_routers", ["%s %s" % (n, r.get("rule", "")) for n, r in sorted(routers.items())])
 
 
+def masked_value(key, value):
+    """A label or setting value masked with its key as context (api_token=..., basicauth.users=...)."""
+    value = str(value)
+    line = secretlib.mask("%s=%s" % (key, value))
+    return line[len(key) + 1:] if line.startswith(key + "=") else secretlib.mask(value)
+
+
 def sec_traefik():
     """Find Traefik's static config, CLI flags, file-provider configs and Docker labels; report routers."""
     static_files = [p for p in ("/etc/traefik/traefik.yml", "/etc/traefik/traefik.yaml", "/etc/traefik/traefik.toml")
@@ -1771,6 +2034,10 @@ def sec_traefik():
                     args = json.loads(cols[3]) or []
                 except ValueError:
                     continue
+                # read raw (masking would break the JSON), masked here before anything else sees them:
+                # labels and args can carry tokens, basic-auth hashes, URLs with passwords
+                labels = {k: masked_value(k, v) for k, v in labels.items()}
+                args = [secretlib.mask(str(a)) for a in args]
                 tl = {k[len("traefik."):].lower(): v for k, v in labels.items() if k.lower().startswith("traefik.")}
                 if tl:
                     label_flats.append(("docker " + cols[0].lstrip("/"), tl))
@@ -1984,6 +2251,8 @@ def sec_web():
                     a = re.sub(r"^\w+://", "", a).split("/")[0].rsplit(":", 1)[0].lower()
                     if a and "." in a:
                         SERVED_NAMES.add(a)
+            for info in per_site.values():
+                PROXY_UPSTREAM_PORTS.update(x for x in map(upstream_port, info["reverse_proxy"]) if x)
             for s, info in per_site.items():
                 if s == "(global options)":
                     continue
@@ -1996,6 +2265,8 @@ def sec_web():
         rc, ngx = run(["nginx", "-T"], timeout=60)
         if rc == 0:
             for sv in nginx_report(ngx):
+                PROXY_UPSTREAM_PORTS.update(x for x in (upstream_port(l["upstream"]) for l in sv["locations"]
+                                                        if l["upstream"]) if x)
                 denied = " ".join(l["path"] for l in sv["locations"] if l["protected"] == "deny")
                 WEB_ROOTS.extend(("nginx", " ".join(sv["names"]), r, denied) for r in sv["roots"])
         emit("  (full masked nginx -T below)")
@@ -2005,6 +2276,7 @@ def sec_web():
     apache_report()
     sec_traefik()
     sec_haproxy()
+    root_web_services()
     emit("")
     emit(".git directories inside web roots (may be downloadable):")
     found = 0
@@ -2021,6 +2293,47 @@ def sec_web():
             dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
     if not found:
         emit("  none")
+
+
+PROXY_UPSTREAM_PORTS = set()  # local ports the reverse proxy forwards to (apps behind it take internet traffic)
+APP_RUNTIME = re.compile(r"^(?:python[\d.]*|node(?:js)?|gunicorn|uvicorn|hypercorn|daphne|granian|java|ruby|puma|"
+                         r"unicorn|bun|deno|dotnet|beam\.smp|php|perl|next-server|npm|tsx|ts-node|streamlit)$")
+
+
+def upstream_port(target):
+    """'127.0.0.1:8000', 'http://localhost:3000/x', ':8080' -> '8000' for a local upstream, else None."""
+    m = re.match(r"^(?:\w+://)?(\[[^\]]*\]|[^/:]*)?:(\d+)", target.strip())
+    if not m:
+        return None
+    host = (m.group(1) or "").strip("[]").lower()
+    return m.group(2) if host in ("", "localhost", "127.0.0.1", "::1", "0.0.0.0") or host.startswith("127.") else None
+
+
+def proc_uid(pid):
+    try:
+        return os.stat("/proc/%s" % pid).st_uid
+    except OSError:
+        return None
+
+
+def root_web_services():
+    """An app runtime that runs as root and takes web traffic (public bind, or the reverse proxy's upstream):
+    a remote-code-execution bug in that app is root on the host."""
+    seen = set()
+    for pr, a, p, n, pid, k in LISTEN:
+        if pr != "tcp" or not pid or pid in seen:
+            continue
+        names = [re.sub(r"\s*\(.*$", "", x) for x in n.split(",")]
+        if not any(APP_RUNTIME.match(x) for x in names):
+            continue
+        if proc_uid(pid) != 0:
+            continue
+        if k == "loopback" and p not in PROXY_UPSTREAM_PORTS:
+            continue
+        seen.add(pid)
+        flag("web", "%s (pid %s) runs as root and takes web traffic (%s:%s%s) — a remote-code-execution bug in "
+             "that app is root on the host; run it as its own user" % (n, pid, a, p, ", the reverse proxy's upstream"
+                                                                       if k == "loopback" else ""))
 
 
 WEB_ROOTS = []  # (server, site, document root, config text that may already block paths) for the .htaccess check
@@ -2224,8 +2537,30 @@ def readers_note():
     return _READERS[0]
 
 
+def human_logins():
+    """Login-shell accounts of people (uid >= 1000), not root and not system accounts with a shell."""
+    return sorted(p.pw_name for p in login_users() if 1000 <= p.pw_uid < 65534)
+
+
+def world_data_report(paths):
+    """Databases and dumps every local user can read: one line, not one per file. With no other person
+    logging in than the operator, it is a LOW note (a hole in a service account still reads them)."""
+    if not paths:
+        return
+    text = "%d database/dump file(s) readable by every local user: %s%s" % (
+        len(paths), ", ".join(paths[:5]), ", …" if len(paths) > 5 else "")
+    humans = human_logins()
+    op = os.environ.get("SUDO_USER")
+    if len(humans) <= 1 and (not op or op == "root" or humans in ([], [op])):
+        emit("  note (LOW): %s — no one but root%s logs in here; a hole in a service account still reads them%s"
+             % (text, " and " + humans[0] if humans else "", readers_note()))
+    else:
+        flag("files", text + " (login accounts: %s)%s" % (", ".join(humans), readers_note()))
+
+
 def sec_files():
     header("SENSITIVE FILES & PERMISSIONS")
+    world_data = []
     emit("files with sensitive names: mode owner size age world? detail path")
     emit("(world=yes means EVERY local user can read it: o+r on the file AND o+x on every parent dir)")
     n = 0
@@ -2255,10 +2590,14 @@ def sec_files():
             emit("  %s %-20s %10d %5.0fd %-3s %-28s %s" % (mode_str(st), owner_str(st), st.st_size, age,
                                                            "yes" if world else "no", detail[:28], path))
             if world and worth and not EXAMPLE_PATH.search(path):
+                if cat == "data":
+                    world_data.append(path)
+                    continue
                 flag("files", "readable by every local user: %s (%s %s, %s)%s"
                      % (path, mode_str(st), owner_str(st), detail, readers_note()))
     if n > 800:
         emit("  ... %d more files not listed" % (n - 800))
+    world_data_report(world_data)
     emit("")
     emit("home / agent directories:")
     users = login_users()
@@ -2610,6 +2949,27 @@ def last_status_line(log_text):
     return None
 
 
+def missed_run_report(lg, st, now=None):
+    """A run that never happened writes no error, so failure alerts stay silent and a staleness check that
+    fires after a day and a half sees nothing once the next night succeeds. Look for the hole in the log."""
+    try:
+        with open(lg, "rb") as f:
+            f.seek(max(0, st.st_size - 1_000_000))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return
+    gaps, usual = missed_runs(success_runs(text, now), now)
+    for a, b, n in gaps:
+        down = [(d, u) for d, u in downtimes() if d < b and u > a]
+        why = "; the host was down %s" % ", ".join("%s → %s (%.1f h)" % (
+            d.strftime("%m-%d %H:%M"), u.strftime("%m-%d %H:%M"), (u - d).total_seconds() / 3600) for d, u in down) \
+            if down else ""
+        flag("backups", "a missed backup run went unnoticed: %s shows no success between %s and %s (usually every "
+             "%.0f h; %d run(s) missed)%s — a run that never starts reports no failure; alert on a missing success "
+             "(a dead-man's switch ping on every good run), not only on errors"
+             % (lg, a.strftime("%Y-%m-%d %H:%M"), b.strftime("%Y-%m-%d %H:%M"), usual / 3600, n, why))
+
+
 def backup_ladder(jobs, job_texts, job_scripts, ladder_files):
     emit("")
     all_text = "\n".join(job_texts)
@@ -2651,6 +3011,7 @@ def backup_ladder(jobs, job_texts, job_scripts, ladder_files):
         if line and status_problem(line):
             flag("backups", "last status line in %s reports a problem (%.1f days ago): %s"
                  % (lg, age, stable(line)[:120]))
+        missed_run_report(lg, st)
 
     alert = ALERT_RX.search(all_text) or CRON_MAILTO
     fresh = any(sched and age <= 2 and nontrivial for sched, age, nontrivial in ladder_files)
@@ -2907,7 +3268,8 @@ def sec_processes():
 
 # ---------------------------------------------------------------- main
 # Facts one section reads from another: backups and processes look at the cron lines.
-NEEDS = {"backups": ["cron"], "processes": ["cron"], "podman": ["network"], "files": ["network"], "tls": ["web"]}
+NEEDS = {"backups": ["cron"], "processes": ["cron"], "podman": ["network"], "files": ["network"], "tls": ["web"],
+         "firewall": ["network"], "services": ["users"], "cron": ["users"], "web": ["network"]}
 
 
 def run_quietly(fn, name):
@@ -2966,11 +3328,7 @@ def main():
                       "sections": sorted(wanted) if wanted else "all", "schema": 1}
     drift, n_changes = drift_lines(out_dir, args.baseline)
 
-    head = ["server-audit inventory — SENSITIVE (topology and weaknesses). Do not share or commit.",
-            "Candidate findings (each needs verification before it goes in a report): %d" % len(FLAGS)]
-    head += ["  " + fl for fl in FLAGS]
-    head += ["", "Changes since the previous audit of this host (drift; + added, - removed, ~ changed):"]
-    head += ["  " + l for l in drift]
+    head = inventory_head(FLAGS, drift, n_changes)
     path = os.path.join(out_dir, "inventory.txt")
     write_private(path, "\n".join(head + OUT) + "\n", sudo_uid, sudo_gid)
     write_private(os.path.join(out_dir, "state.json"), json.dumps(STATE, indent=1, sort_keys=True) + "\n",
@@ -2988,6 +3346,20 @@ def main():
         for line in drift[1:]:
             print("  " + line)
         sys.exit(3)
+
+
+def inventory_head(flags, drift, n_changes):
+    """Top of inventory.txt: the candidates, then the drift block under ONE header line that names the
+    baseline (the report's "Changes since the last audit" section is filled from it)."""
+    head = ["server-audit inventory — SENSITIVE (topology and weaknesses). Do not share or commit.",
+            "Candidate findings (each needs verification before it goes in a report): %d" % len(flags)]
+    head += ["  " + fl for fl in flags]
+    if n_changes is None:  # no baseline, or it could not be read
+        head += ["", "Changes since the previous audit of this host: " + drift[0]]
+    else:
+        head += ["", "Changes since %s — %d (drift; + added, - removed, ~ changed):" % (drift[0], n_changes)]
+    head += ["  " + l for l in drift[1:]]
+    return head
 
 
 def write_private(path, text, uid, gid):

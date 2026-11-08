@@ -125,10 +125,11 @@ class Lab:
 
     def test_drift_sees_the_change(self):
         self.assertIn("this run is the baseline", self.inv1)
-        drift = self.inv2.split("Changes since the previous audit")[1].split("\n\n")[0]
+        self.assertEqual(self.inv2.count("\nChanges since "), 1)  # one header line, naming the baseline
+        drift = self.inv2.split("\nChanges since ")[1].split("\n\n")[0]
         self.assertIn("intruder", drift)
         self.assertIn("9999", drift)
-        self.assertIn(self.hostname + "-", drift.splitlines()[1])
+        self.assertTrue(drift.startswith(self.hostname + "-"), drift.splitlines()[0])
 
     def test_nothing_leaks(self):
         self.assertTrue(self.fake)
@@ -163,6 +164,7 @@ class UbuntuLab(Lab, unittest.TestCase):
         self.assert_candidates([
             "PasswordAuthentication yes",
             "lets deploy run `/usr/bin/less /var/log/shop/*`",
+            "stale sudo rule for a non-existent user ghost (ghost)",
             "root cron runs /home/deploy/sync.sh which is writable by non-root",
             "readable by every local user: /srv/shop/.env",
             "/srv/shop/.git exists inside a web root",
@@ -241,6 +243,7 @@ class RhelLab(Lab, unittest.TestCase):
     def test_planted_problems_are_candidates(self):
         self.assert_candidates([
             "PermitRootLogin yes",
+            "a missed backup run went unnoticed: /var/log/shop/offsite.log shows no success between",
             "nginx shop.example.com: location /admin/ serves http://127.0.0.1:8080 without auth",
             "nginx webmail.example.com serves /srv/webmail, but nginx ignores .htaccess: 2 are protected only "
             "there (/config/, /logs/)",

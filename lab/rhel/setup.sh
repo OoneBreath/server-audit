@@ -53,7 +53,7 @@ mkdir -p /opt/shop
 printf 'DB_PASSWORD=%s\n' "$(python3 -c 'import secrets;print(secrets.token_urlsafe(18))')" > /opt/shop/.env
 chmod 644 /opt/shop/.env
 
-# nightly offsite copy: rclone crypt over Google Drive (fake token), mirrored with `rclone sync`
+# nightly offsite copy: rclone crypt over a cloud-drive remote (fake token), mirrored with `rclone sync`
 mkdir -p /root/.config/rclone /var/backups/shop /var/log/shop
 cat > /root/.config/rclone/rclone.conf <<EOS
 [gdrive]
@@ -76,6 +76,10 @@ chmod 755 /usr/local/sbin/shop-offsite.sh
 # run the way many crontabs do: cd, then a relative script (the audit must still follow it)
 echo '30 3 * * * root cd /usr/local/sbin && ./shop-offsite.sh' > /etc/cron.d/shop-offsite
 tar czf /var/backups/shop/shop-2026-11-01.tgz /srv/www 2>/dev/null
+# the job's log: a good run every night, except one night when the host was off (nothing alerted)
+for d in 12 11 10 9 8 7 6 4 3 2 1; do
+    echo "$(date -u -d "$d days ago" +%Y-%m-%dT03:30:00+00:00) offsite OK" >> /var/log/shop/offsite.log
+done
 
 # HAProxy: the runtime API on the network, a stats page without auth, /admin routed without auth, a plain-text
 # userlist password (FAKE) in a config every local user can read

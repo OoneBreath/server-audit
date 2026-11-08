@@ -1,7 +1,7 @@
 ---
 name: server-audit
 description: This skill should be used when the user asks to audit, security-check or harden a Linux server or VPS they run (Ubuntu, Debian, RHEL family; Caddy, nginx, Apache, Traefik, HAProxy; Docker, Podman), e.g. "audit this server", "security check the VPS", "what is exposed to the internet", "check open ports / firewall / SSH", "are there secrets lying around on the box", "is Docker bypassing ufw", "check the Caddy/nginx auth on admin routes", "audyt serwera", "sprawdź bezpieczeństwo VPS", "co jest wystawione do internetu", "compare my servers", or after an incident (leaked key, outage, unexpected login) to find what else is wrong. Read-only inventory of the host (ports, firewall incl. Docker, SSH, users and sudo, services, reverse proxy, TLS, secrets and permissions, backups, disk, updates and end of support, DNS and mail authentication, AI agents and injection text), drift since the last audit, comparison of several hosts, verification of every finding (outside-in from another host where possible), a severity-ranked report, and fixes only after explicit approval. Not for reviewing application source code.
-version: 0.4.2
+version: 0.4.3
 ---
 
 # Server audit
@@ -79,11 +79,20 @@ Unexplained drift (a key, account or listener nobody added) is a finding on its 
 sudo python3 -I <skill>/scripts/find_secrets.py --git-history --out ~/.server-audit/<run>/secrets.txt
 ```
 
+**Run it in the background** (`run_in_background`, or `nohup … &` and poll the output file): on a host
+with many repositories and long agent transcripts it takes minutes, and it prints progress to stderr
+(`scanning <root> (n/N)…`, a heartbeat every 15 s, `done in N s`). Carry on with step 4 meanwhile.
+Package caches, SDKs and editor servers (`~/.pub-cache`, `~/.gradle`, `~/.m2`, `~/.cargo/registry`,
+`flutter`, `android-sdk`, `~/.vscode-server`, `~/.windsurf-server`, …) are skipped — third-party code full
+of example keys; the credential files next to them (`~/.pub-cache/credentials.json`,
+`~/.gradle/gradle.properties`, `~/.m2/settings.xml`) are still scanned. `--include-caches` scans
+everything; `--max-seconds N` writes a partial report that names what was not scanned.
+
 Add `--transcripts` when AI agents run on the host (the inventory's PROCESSES section says so):
-anything found in a transcript was sent to a model provider. Add specific paths for app
-directories outside the defaults. The report lists location, exposure tags, key name, length and a
-per-run fingerprint — never values. Identical fingerprints under different key names reveal reused
-passwords.
+anything found in a transcript was sent to a model provider (`--since 30d` limits it to recent
+transcripts on a re-run). Add specific paths for app directories outside the defaults. The report
+lists location, exposure tags, key name, length and a per-run fingerprint — never values. Identical
+fingerprints under different key names reveal reused passwords.
 
 ### 3b. DNS and mail (names from the proxy config)
 
@@ -196,9 +205,10 @@ values, no fingerprints. Point to the report path instead of copying it.
   `--exit-code`.
 - **`scripts/dns_check.py`** — DNS and mail-authentication check (dig only).
 - **`scripts/find_secrets.py`** — secret locator. `PATH…` (default system/app/home roots),
-  `--git-history`, `--transcripts`, `--out FILE`, `--include-examples`, `--max-mb N`,
-  `--fleet-key-stdin` (cross-host fingerprints for fleet.py). Also the leak check for any file about
-  to be shared.
+  `--git-history`, `--transcripts`, `--since 30d`, `--out FILE`, `--include-examples`,
+  `--include-caches`, `--max-seconds N`, `--max-mb N`, `--quiet`, `--fleet-key-stdin` (cross-host
+  fingerprints for fleet.py). Progress on stderr: run it in the background. Also the leak check for any
+  file about to be shared.
 - **`scripts/fleet.py`** — compare several hosts' runs on the operator's machine (`key`, `compare`).
 - **`scripts/probe_external.sh`** — outside-in probe for one target: open ports, what answers
   (plain HTTP on admin ports, SSH auth methods offered, mail banners), TLS versions/HSTS/cert, CDN

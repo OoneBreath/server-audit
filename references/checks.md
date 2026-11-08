@@ -39,7 +39,9 @@ Rules that are true and routinely forgotten:
   listen on `*:PORT` (Next.js defaults to this) also let anyone who reaches the port skip the proxy's
   auth and headers.
 - **Stale allow rules** (ufw allows a port nothing listens on publicly) are LOW today and a trap
-  tomorrow: the next thing bound to that port is instantly exposed to that source.
+  tomorrow: the next thing bound to that port is instantly exposed to that source. A rule whose source is
+  a Docker bridge subnet (172.16.0.0/12, usually "let containers reach the host's mail or DB") on a host
+  where Docker is not installed is left over from an old setup: the candidate says so, delete it.
 - **firewalld** (RHEL family): the active zones list the open services and ports; a port opened in a zone
   that nothing listens on is a stale rule (same trap as ufw). `cockpit` in the public zone exposes a web
   admin console on :9090. firewalld installed but not running = no filtering. Docker publishes ports
@@ -199,6 +201,10 @@ probe (auth methods offered).
   untrusted input (web requests, logs, LLM output) = MEDIUM–HIGH.
 - Membership of `docker`, `lxd`, `disk` = root-equivalent; say so.
 - A writable `/etc/sudoers.d/*` = HIGH.
+- **A sudo rule for a user or group that does not exist** (`getent passwd`/`getent group` finds nothing)
+  grants nothing today, but whoever later creates that name — a package, a new hire, an attacker who can add
+  users — gets the rule's rights at once. LOW; delete the rule (`visudo -c` after). It is not reported as
+  root-equivalent.
 - **Accounts that can log in but nobody uses** (`can log in (password/SSH key) but has never logged in /
   last logged in N days ago`): leftovers of past collaborators, test users, keys nobody recognises. Ask
   before touching; propose `usermod -L` / removing the key, never delete in the audit. `lastlog` only
@@ -237,6 +243,9 @@ How exposed a secret is matters more than where it is:
   network services (listed in the candidate: the reverse proxy, app servers, also those on 127.0.0.1 behind
   the proxy) read the file too, so one hole in any of those apps reads every world-readable `.env`, key and
   dump. Rate it by the most exposed of those services; LOW only when no service runs as another account.
+- World-readable **databases and dumps** are listed in one line, not one per file. When no one logs in but
+  root and the operator (login shells with uid ≥ 1000), that line is a `note (LOW)` naming the service
+  accounts that could still read them; with other people on the host it stays a candidate.
 - Git: for every flagged repo, find out where it is pushed (`git remote -v`) and whether that remote
   is public (`gh repo view --json visibility` if gh is signed in, otherwise ask). History findings
   stay in clones and forks after a rewrite — rotation is still required.
@@ -253,7 +262,12 @@ code that reads secrets from the environment.
 
 - **Root runs something a non-root user can write** (script, its directory, the interpreter's script
   argument, a cron target in a home directory) = privilege escalation for that user. Rate by who that
-  user is: if it already has `NOPASSWD: ALL`, LOW; if it is a service account, HIGH.
+  user is: a service account = HIGH. When every account that can write the path already has passwordless
+  `sudo ALL`, it is no escalation: the inventory lists all such paths in one `note (INFO)` line instead of
+  one candidate each.
+- **A web-facing app runs as root** (`gunicorn`, `uvicorn`, `node`, `java`, `php`, … owned by root, bound to
+  a public address or forwarded to by the reverse proxy): a remote-code-execution bug in that app is root on
+  the host. MEDIUM–HIGH by what the app does; fix with `User=` in its unit and a writable data directory.
 - **Processes outside systemd die on reboot.** Listeners in a login session scope (`nohup`, `screen`,
   `tmux`, started by an agent in a shell) do not come back after a host restart — and hosts do
   restart (kernel updates, provider maintenance, unpaid renewals). MEDIUM for anything that matters;
@@ -300,6 +314,12 @@ code that reads secrets from the environment.
 - **A backup job that runs is not a backup.** Check: newest non-trivial file is fresh (≤ 1 day for
   daily jobs), sizes do not collapse (a 20-byte gzip is an empty dump), the job reports failures
   somewhere a human reads, and a restore was tested at least once.
+- **A missed run is silent.** When the host is off at backup time (provider shutdown, crash, maintenance),
+  the job never starts: no error, no failure mail, and a staleness check that fires after 36 h sees nothing
+  once the next night succeeds. The inventory reads each backup log's success lines, learns the usual
+  interval (median gap) and reports gaps longer than 1.5× that interval in the last 45 days, with the
+  downtime from `last -x` that explains them. MEDIUM when the data changes daily; the fix is an alert on a
+  *missing* success (a dead-man's-switch ping after every good run), not only on errors.
 - Backups on the same disk/host only protect against mistakes, not against host loss, provider
   suspension or ransomware. No offsite copy of a production database = MEDIUM (HIGH for customer
   data). Provider snapshots count only if the operator confirms they exist and are paid for.
@@ -383,6 +403,12 @@ Put these in the report under "Not checked / needs the operator", phrased as yes
 
 - Hosting and domain **auto-renewal** (an unpaid VPS renewal powers the host off — every service
   down, no error inside the box), payment method valid, billing contact reachable.
+- **Shutdowns that came from outside the guest** (HOST: `the host was shut down from outside`, from
+  `systemd-logind: System is powering down (hypervisor initiated shutdown)`, `qemu-ga: guest-shutdown
+  called`, an ACPI power-button event) and the downtimes from `last -x`: an availability event of their
+  own. Ask the provider why (maintenance, host failure, unpaid invoice, someone with the provider account)
+  and whether an external uptime monitor alerted. Rate by the length of the outage: hours down with nobody
+  told = MEDIUM.
 - Provider snapshots/backups enabled and paid; offsite backup exists; last restore test date.
 - DNS: who can change it, registrar 2FA, CAA records.
 - Provider console/API 2FA, SSH keys registered at the provider, rescue-mode access.

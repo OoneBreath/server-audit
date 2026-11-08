@@ -9,6 +9,8 @@ useradd -m -u 1000 -s /bin/bash ops
 useradd -m -s /bin/bash deploy
 echo 'ops ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ops
 echo 'deploy ALL=(root) NOPASSWD: /usr/bin/less /var/log/shop/*' > /etc/sudoers.d/deploy
+# left over from an account that was deleted: whoever creates `ghost` later gets root
+echo 'ghost ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ghost
 chmod 440 /etc/sudoers.d/*
 echo 'deploy:summer2026' | chpasswd
 
