@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.4: one finding per missed run, the firewall behind a root app
+
+Released 8 November 2026. From a re-run of the 0.4.3 field audit.
+
+- **A missed backup run is reported once.** A job that writes its own log and whose output cron also
+  redirects to a second log showed the same hole twice. Holes that overlap across logs are now one
+  candidate that names every log ("nightly-backup.log and cron.log show no success between …");
+  different holes stay separate.
+- **A root web app names what ufw lets reach it.** For an app bound to a public address, the candidate now
+  says when ufw admits the port only from some sources ("ufw admits port 8500 only from 203.0.113.7, not
+  from the whole internet"), or from nowhere outside, so the rating can account for the compensating
+  control. A port the reverse proxy forwards to is still reported as internet-reachable. Rules with a v6
+  source count only for sockets that accept IPv6. `--only web` now reads ufw too.
+
 ## 0.4.3: missed backups, a faster secret scan, less noise
 
 Released 8 November 2026. From a field audit of a single-operator host (root, Caddy, an rclone offsite

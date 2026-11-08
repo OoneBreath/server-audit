@@ -109,7 +109,7 @@ class MissedRuns(unittest.TestCase):
             f.write(nightly_log(skip=(7,)))
         down = (NOW.replace(hour=1) - dt.timedelta(days=7), NOW.replace(hour=18) - dt.timedelta(days=7))
         with mock.patch.object(collect, "downtimes", return_value=[down]):
-            collect.missed_run_report(lg, os.stat(lg), NOW)
+            collect.missed_run_report([(lg, os.stat(lg))], NOW)
         self.assertEqual(len(collect.FLAGS), 1)
         f = collect.FLAGS[0]
         self.assertIn("a missed backup run went unnoticed", f)

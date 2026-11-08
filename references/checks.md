@@ -268,6 +268,10 @@ code that reads secrets from the environment.
 - **A web-facing app runs as root** (`gunicorn`, `uvicorn`, `node`, `java`, `php`, … owned by root, bound to
   a public address or forwarded to by the reverse proxy): a remote-code-execution bug in that app is root on
   the host. MEDIUM–HIGH by what the app does; fix with `User=` in its unit and a writable data directory.
+  The candidate says what ufw lets reach a public bind: only some sources (one control, one source:
+  MEDIUM), no allow rule at all (local users only), or nothing when the port is open to anywhere. A port the
+  reverse proxy forwards to stays internet-reachable whatever its ufw rule says. ufw is all the inventory
+  reads here: confirm outside-in, and check nftables and the provider firewall.
 - **Processes outside systemd die on reboot.** Listeners in a login session scope (`nohup`, `screen`,
   `tmux`, started by an agent in a shell) do not come back after a host restart — and hosts do
   restart (kernel updates, provider maintenance, unpaid renewals). MEDIUM for anything that matters;
@@ -318,7 +322,9 @@ code that reads secrets from the environment.
   the job never starts: no error, no failure mail, and a staleness check that fires after 36 h sees nothing
   once the next night succeeds. The inventory reads each backup log's success lines, learns the usual
   interval (median gap) and reports gaps longer than 1.5× that interval in the last 45 days, with the
-  downtime from `last -x` that explains them. MEDIUM when the data changes daily; the fix is an alert on a
+  downtime from `last -x` that explains them. The same hole in several logs (a job's own log and the cron
+  redirect of its output) is one candidate naming every log. MEDIUM when the data changes daily; the fix is
+  an alert on a
   *missing* success (a dead-man's-switch ping after every good run), not only on errors.
 - Backups on the same disk/host only protect against mistakes, not against host loss, provider
   suspension or ransomware. No offsite copy of a production database = MEDIUM (HIGH for customer

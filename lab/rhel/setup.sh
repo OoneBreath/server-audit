@@ -71,14 +71,17 @@ cat > /usr/local/sbin/shop-offsite.sh <<'EOS'
 #!/bin/sh
 tar czf /var/backups/shop/shop-$(date +%F).tgz /opt/shop /srv/www
 rclone sync /var/backups/shop gcrypt:web-01 >> /var/log/shop/offsite.log 2>&1 && echo "$(date -Is) offsite OK" >> /var/log/shop/offsite.log
+echo "$(date -Is) shop-offsite: done"
 EOS
 chmod 755 /usr/local/sbin/shop-offsite.sh
 # run the way many crontabs do: cd, then a relative script (the audit must still follow it)
-echo '30 3 * * * root cd /usr/local/sbin && ./shop-offsite.sh' > /etc/cron.d/shop-offsite
+# and cron keeps the job's stdout in a second log: one missed night shows in both (one finding, not two)
+echo '30 3 * * * root cd /usr/local/sbin && ./shop-offsite.sh >> /var/log/shop/cron.log 2>&1' > /etc/cron.d/shop-offsite
 tar czf /var/backups/shop/shop-2026-11-01.tgz /srv/www 2>/dev/null
 # the job's log: a good run every night, except one night when the host was off (nothing alerted)
 for d in 12 11 10 9 8 7 6 4 3 2 1; do
     echo "$(date -u -d "$d days ago" +%Y-%m-%dT03:30:00+00:00) offsite OK" >> /var/log/shop/offsite.log
+    echo "$(date -u -d "$d days ago" +%Y-%m-%dT03:31:00+00:00) shop-offsite: done" >> /var/log/shop/cron.log
 done
 
 # HAProxy: the runtime API on the network, a stats page without auth, /admin routed without auth, a plain-text

@@ -13,7 +13,7 @@ tests, not by promises.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Runtime deps](https://img.shields.io/badge/runtime%20deps-zero-success)](#install)
 
-**v0.4.3** · Python 3 stdlib + bash · Ubuntu, Debian and the RHEL family · Caddy, nginx, Apache, Traefik, HAProxy ·
+**v0.4.4** · Python 3 stdlib + bash · Ubuntu, Debian and the RHEL family · Caddy, nginx, Apache, Traefik, HAProxy ·
 tested end to end on two deliberately broken lab servers in CI · used on production VPSs since
 November 2026 ([CHANGELOG](CHANGELOG.md)).
 

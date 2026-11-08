@@ -724,6 +724,70 @@ def docker_subnet_note(src):
     return "; the source is a Docker bridge subnet and Docker is not installed — nothing uses this rule, delete it"
 
 
+UFW = {}  # "active", "default_in" and the parsed rules [(to, action, direction, source)] of `ufw status verbose`
+UFW_RULE = re.compile(r"^(?P<to>\S.*?)\s+(?P<act>ALLOW|LIMIT|DENY|REJECT)(?:\s+(?P<dir>IN|OUT|FWD))?\s+"
+                      r"(?P<src>\S.*?)\s*(?:#.*)?$")
+
+
+def ufw_load(out):
+    UFW.clear()
+    UFW["active"] = "Status: active" in out
+    m = re.search(r"^Default:\s*(\w+)\s*\(incoming\)", out, re.M)
+    UFW["default_in"] = m.group(1).lower() if m else "?"
+    UFW["rules"] = [(m.group("to"), m.group("act"), m.group("dir") or "IN", m.group("src"))
+                    for m in map(UFW_RULE.match, out.splitlines()) if m and m.group("to") not in ("To", "--")]
+
+
+def ufw_covers(to, port, proto="tcp"):
+    """Does the To column of a ufw rule ('5000/tcp', '80,443/tcp (Nginx Full)', '8000:8100/tcp on eth0',
+    'Anywhere', '203.0.113.5 5000/tcp') include PORT?"""
+    t = re.sub(r"\s+on\s+\S+", "", re.sub(r"\([^)]*\)", "", to)).split()
+    spec = next((x for x in t if re.match(r"^\d[\d,:]*(?:/\w+)?$", x)), None)
+    if spec is None:  # 'Anywhere' or an address: every port; an unexpanded app profile: unknown, not counted
+        return bool(t) and (t[0] == "Anywhere" or bool(re.match(r"^[\d.:a-fA-F]+(?:/\d+)?$", t[0])))
+    ports, _, pr = spec.partition("/")
+    if pr and pr != proto:
+        return False
+    for part in ports.split(","):
+        lo, _, hi = part.partition(":")
+        if lo.isdigit() and int(lo) <= int(port) <= int(hi if hi.isdigit() else lo):
+            return True
+    return False
+
+
+def ufw_sources(port, addr="0.0.0.0", proto="tcp"):
+    """Who ufw lets reach PORT bound on ADDR: None when ufw does not filter it (inactive, not read, incoming
+    allowed by default), [] when no rule admits it, else ['203.0.113.7', 'Anywhere on wg0', …]."""
+    if not UFW.get("active") or UFW.get("default_in") not in ("deny", "reject"):
+        return None
+    v4_only = "." in addr
+    v6_only = ":" in addr.strip("[]") and addr.strip("[]") != "::"
+    out = []
+    for to, act, d, src in UFW["rules"]:
+        if act not in ("ALLOW", "LIMIT") or d != "IN" or not ufw_covers(to, port, proto):
+            continue
+        v6 = "(v6)" in to or "(v6)" in src or ":" in src.split()[0]  # a v6 source carries no (v6) tag
+        if (v6 and v4_only) or (not v6 and v6_only):
+            continue
+        m = re.search(r"\bon\s+(\S+)", to)
+        who = re.sub(r"\s*\(v6\)", "", src).strip() + (" on " + m.group(1) if m else "")
+        if who not in out:
+            out.append(who)
+    return out
+
+
+def firewall_note(port, addr):
+    """What the host firewall adds to a public bind ('' when ufw does not narrow it or is unknown)."""
+    srcs = ufw_sources(port, addr)
+    if srcs is None or "Anywhere" in srcs:
+        return ""
+    if not srcs:
+        return "; ufw admits no traffic to port %s from outside, so only local users and processes reach it " \
+               "directly (verify outside-in)" % port
+    return "; ufw admits port %s only from %s, not from the whole internet (verify outside-in)" \
+        % (port, ", ".join(srcs[:4]) + (" …" if len(srcs) > 4 else ""))
+
+
 def sec_firewall():
     header("FIREWALL")
     if need_root("firewall"):
@@ -736,6 +800,7 @@ def sec_firewall():
               ("active" if "Status: active" in out else "?"))
         state("firewall", "ufw_rules", [re.sub(r"\s+", " ", l.strip()) for l in out.splitlines()
                                         if re.search(r"\b(ALLOW|DENY|LIMIT|REJECT)\b", l)])
+        ufw_load(out)
         public_tcp = {p for pr, a, p, n, _, k in LISTEN if pr == "tcp" and k != "loopback"}
         stale = []
         for l in out.splitlines():
@@ -2328,12 +2393,16 @@ def root_web_services():
             continue
         if proc_uid(pid) != 0:
             continue
-        if k == "loopback" and p not in PROXY_UPSTREAM_PORTS:
+        proxied = p in PROXY_UPSTREAM_PORTS
+        if k == "loopback" and not proxied:
             continue
         seen.add(pid)
+        fw = "" if k == "loopback" else firewall_note(p, a)
+        if proxied and fw:  # the proxy carries internet traffic to it whatever ufw says about the port
+            fw = "; ufw narrows the port, but the reverse proxy forwards internet traffic to it anyway"
         flag("web", "%s (pid %s) runs as root and takes web traffic (%s:%s%s) — a remote-code-execution bug in "
-             "that app is root on the host; run it as its own user" % (n, pid, a, p, ", the reverse proxy's upstream"
-                                                                       if k == "loopback" else ""))
+             "that app is root on the host; run it as its own user%s"
+             % (n, pid, a, p, ", the reverse proxy's upstream" if proxied else "", fw))
 
 
 WEB_ROOTS = []  # (server, site, document root, config text that may already block paths) for the .htaccess check
@@ -2949,25 +3018,45 @@ def last_status_line(log_text):
     return None
 
 
-def missed_run_report(lg, st, now=None):
-    """A run that never happened writes no error, so failure alerts stay silent and a staleness check that
-    fires after a day and a half sees nothing once the next night succeeds. Look for the hole in the log."""
+def missed_run_gaps(lg, st, now=None):
+    """[(log, last success before the hole, first success after it, runs missed, usual interval s)]."""
     try:
         with open(lg, "rb") as f:
             f.seek(max(0, st.st_size - 1_000_000))
             text = f.read().decode("utf-8", "replace")
     except OSError:
-        return
+        return []
     gaps, usual = missed_runs(success_runs(text, now), now)
-    for a, b, n in gaps:
+    return [(lg, a, b, n, usual) for a, b, n in gaps]
+
+
+def missed_run_report(logs, now=None):
+    """A run that never happened writes no error, so failure alerts stay silent and a staleness check that
+    fires after a day and a half sees nothing once the next night succeeds. Look for the hole in the logs.
+    LOGS: [(path, stat)]. One job often writes two logs (its own and the cron redirect): the same hole in
+    several logs is one missed run, reported once with every log that shows it."""
+    found = sorted((g for lg, st in logs for g in missed_run_gaps(lg, st, now)), key=lambda g: g[1])
+    groups = []
+    for g in found:
+        if groups and g[1] < groups[-1]["b"] and groups[-1]["a"] < g[2]:  # overlapping holes
+            last = groups[-1]
+            last["a"], last["b"] = max(last["a"], g[1]), min(last["b"], g[2])
+            last["n"] = max(last["n"], g[3])
+            if g[0] not in last["logs"]:
+                last["logs"].append(g[0])
+        else:
+            groups.append({"logs": [g[0]], "a": g[1], "b": g[2], "n": g[3], "usual": g[4]})
+    for gr in groups:
+        a, b = gr["a"], gr["b"]
         down = [(d, u) for d, u in downtimes() if d < b and u > a]
         why = "; the host was down %s" % ", ".join("%s → %s (%.1f h)" % (
             d.strftime("%m-%d %H:%M"), u.strftime("%m-%d %H:%M"), (u - d).total_seconds() / 3600) for d, u in down) \
             if down else ""
-        flag("backups", "a missed backup run went unnoticed: %s shows no success between %s and %s (usually every "
+        flag("backups", "a missed backup run went unnoticed: %s show%s no success between %s and %s (usually every "
              "%.0f h; %d run(s) missed)%s — a run that never starts reports no failure; alert on a missing success "
              "(a dead-man's switch ping on every good run), not only on errors"
-             % (lg, a.strftime("%Y-%m-%d %H:%M"), b.strftime("%Y-%m-%d %H:%M"), usual / 3600, n, why))
+             % (" and ".join(sorted(gr["logs"])), "" if len(gr["logs"]) > 1 else "s", a.strftime("%Y-%m-%d %H:%M"),
+                b.strftime("%Y-%m-%d %H:%M"), gr["usual"] / 3600, gr["n"], why))
 
 
 def backup_ladder(jobs, job_texts, job_scripts, ladder_files):
@@ -2996,6 +3085,7 @@ def backup_ladder(jobs, job_texts, job_scripts, ladder_files):
     for sc in job_scripts:
         d = os.path.dirname(sc)
         logs |= set(glob.glob(os.path.join(d, "*.log")) + glob.glob(os.path.join(d, "logs", "*.log")))
+    read_logs = []
     for lg in sorted(logs)[:6]:
         try:
             st = os.stat(lg)
@@ -3011,7 +3101,8 @@ def backup_ladder(jobs, job_texts, job_scripts, ladder_files):
         if line and status_problem(line):
             flag("backups", "last status line in %s reports a problem (%.1f days ago): %s"
                  % (lg, age, stable(line)[:120]))
-        missed_run_report(lg, st)
+        read_logs.append((lg, st))
+    missed_run_report(read_logs)
 
     alert = ALERT_RX.search(all_text) or CRON_MAILTO
     fresh = any(sched and age <= 2 and nontrivial for sched, age, nontrivial in ladder_files)
@@ -3269,7 +3360,7 @@ def sec_processes():
 # ---------------------------------------------------------------- main
 # Facts one section reads from another: backups and processes look at the cron lines.
 NEEDS = {"backups": ["cron"], "processes": ["cron"], "podman": ["network"], "files": ["network"], "tls": ["web"],
-         "firewall": ["network"], "services": ["users"], "cron": ["users"], "web": ["network"]}
+         "firewall": ["network"], "services": ["users"], "cron": ["users"], "web": ["network", "firewall"]}
 
 
 def run_quietly(fn, name):

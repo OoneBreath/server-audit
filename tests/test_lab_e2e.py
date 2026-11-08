@@ -243,7 +243,8 @@ class RhelLab(Lab, unittest.TestCase):
     def test_planted_problems_are_candidates(self):
         self.assert_candidates([
             "PermitRootLogin yes",
-            "a missed backup run went unnoticed: /var/log/shop/offsite.log shows no success between",
+            "a missed backup run went unnoticed: /var/log/shop/cron.log and /var/log/shop/offsite.log show no "
+            "success between",
             "nginx shop.example.com: location /admin/ serves http://127.0.0.1:8080 without auth",
             "nginx webmail.example.com serves /srv/webmail, but nginx ignores .htaccess: 2 are protected only "
             "there (/config/, /logs/)",
@@ -272,6 +273,10 @@ class RhelLab(Lab, unittest.TestCase):
         ladder = self.state2["backups"]["ladder"]
         self.assertEqual((ladder["offsite"], ladder["encrypted"], ladder["deletable_from_host"]),
                          ("rclone", "yes", "yes"))
+
+    def test_one_missed_run_one_candidate(self):
+        missed = [c for c in self.state2["candidates"]["all"] if "a missed backup run went unnoticed" in c]
+        self.assertEqual(len(missed), 1, missed)
 
     def test_only_backups_still_sees_cron_jobs(self):
         x = ["docker", "exec", self.name]
