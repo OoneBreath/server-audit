@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+- CI: the Python 3.9 unit job runs on `ubuntu-24.04`. setup-python has no 3.9 for `ubuntu-latest` (now
+  Ubuntu 26.04), so the next run on the old matrix would have failed before any test ran.
+
 ## 0.4.4: one finding per missed run, the firewall behind a root app
 
 Released 8 November 2026. From a re-run of the 0.4.3 field audit.
