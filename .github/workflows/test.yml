@@ -7,11 +7,15 @@ permissions:
   contents: read
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.12"]
+        include:
+          # Python 3.9 is the lowest supported version (RHEL 9 still ships it); setup-python no
+          # longer has it for the newest Ubuntu image (ubuntu-latest = 26.04), so it runs on 24.04.
+          - { os: ubuntu-24.04, python: "3.9" }
+          - { os: ubuntu-latest, python: "3.12" }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
