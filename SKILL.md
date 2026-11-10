@@ -1,6 +1,6 @@
 ---
 name: server-audit
-description: This skill should be used when the user asks to audit, security-check or harden a Linux server or VPS they run (Ubuntu, Debian, RHEL family; Caddy, nginx, Apache, Traefik, HAProxy; Docker, Podman), e.g. "audit this server", "security check the VPS", "what is exposed to the internet", "check open ports / firewall / SSH", "are there secrets lying around on the box", "is Docker bypassing ufw", "check the Caddy/nginx auth on admin routes", "audyt serwera", "sprawdź bezpieczeństwo VPS", "co jest wystawione do internetu", "compare my servers", or after an incident (leaked key, outage, unexpected login) to find what else is wrong. Read-only inventory of the host (ports, firewall incl. Docker, SSH, users and sudo, services, reverse proxy, TLS, secrets and permissions, backups, disk, updates and end of support, DNS and mail authentication, AI agents and injection text), drift since the last audit, comparison of several hosts, verification of every finding (outside-in from another host where possible), a severity-ranked report, and fixes only after explicit approval. Not for reviewing application source code.
+description: This skill should be used when the user asks to audit, security-check or harden a Linux server or VPS they run (Ubuntu, Debian, RHEL family; Caddy, nginx, Apache, Traefik, HAProxy; Docker, Podman), either as a full audit with a report ("audit this server", "security check the VPS", "compare my servers", or after an incident such as a leaked key, an outage or an unexpected login) or as one focused question answered in chat ("what is exposed to the internet", "check open ports / firewall / SSH", "is Docker bypassing ufw", "check the Caddy/nginx auth on admin routes", "are there secrets lying around on the box", "audyt serwera", "sprawdź bezpieczeństwo VPS", "co jest wystawione do internetu"). Read-only inventory (ports, firewall incl. Docker, SSH, users and sudo, services, reverse proxy, TLS, secrets, backups, disk, updates and end of support, DNS and mail, AI agents and injection text), drift, several hosts, every finding verified (outside-in where possible, then challenged by an independent verifier), a severity-ranked report, fixes only after explicit approval. Not for reviewing application source code.
 version: 0.4.4
 ---
 
@@ -42,6 +42,40 @@ with `-I`.
 7. **The outputs are sensitive.** Inventory, secret scan and report describe weaknesses of a live
    system: keep them mode 600 under `~/.server-audit/`, never commit or publish them, and run
    `find_secrets.py` on any file before it leaves the host (0 hits required).
+
+## Modes
+
+The hard rules above apply in both modes.
+
+- **full** — "audit this server", a full or complete security check, after an incident, "compare my
+  servers", or whenever the operator wants a report. All steps; `report.md` and `findings.json` in
+  `~/.server-audit/<run>/`.
+- **focused** — one area or one question ("is Docker bypassing ufw?"). Run only the matching
+  sections below. Run `find_secrets.py` only if the question is about secrets. Verify, then answer in
+  chat with the same confidence labels; no report.
+  - **Where the output goes.** `collect.py` always writes `inventory.txt` and a partial `state.json`,
+    so pass `--out "$(mktemp -d)"` and delete that directory afterwards. That way a focused run never
+    becomes the drift baseline of the next full audit. Keep it only if the operator asks.
+  - **When it turns up a HIGH finding.** Use a verifier for it, then *offer* a full audit at the end;
+    don't start one.
+- **Not sure which?** Ask one question before starting.
+
+| Question | `collect.py --only` | `references/checks.md` | Verifier in focused mode |
+|---|---|---|---|
+| What is exposed / open ports | network,firewall,docker,podman | 1. Exposure | HIGH only |
+| Is Docker bypassing the firewall | network,firewall,docker | 1. Exposure | HIGH only |
+| Auth on admin routes / reverse proxy | network,firewall,web | 2. Reverse proxy & web apps | HIGH only |
+| SSH and logins | ssh,users | 3. SSH; 4. Users & sudo | HIGH only |
+| Users and sudo | users | 4. Users & sudo | HIGH only |
+| Secrets lying around | files,git (+ `find_secrets.py`) | 5. Secrets | HIGH only |
+| Services, cron, persistence | services,cron,processes | 6. Services & persistence | HIGH only |
+| Updates, kernel, end of support | host | 7. Updates & kernel | HIGH only |
+| TLS and certificates | web,tls | 8. TLS | HIGH only |
+| Backups | backups,cron | 9. Backups & recovery | HIGH only |
+| Detection (fail2ban, CrowdSec) | hardening | 10. Detection & logging | HIGH only |
+| AI agents, text aimed at them | injection,processes | 11. AI agents on the host | HIGH only |
+| Disk and log growth | disk | 13. Disk & log growth | HIGH only |
+| DNS and mail | (none: `dns_check.py`) | 14. DNS & mail | HIGH only |
 
 ## Workflow
 

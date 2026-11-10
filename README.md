@@ -111,7 +111,13 @@ Ask in plain words, in English or Polish: *"audit this server"*, *"what is expos
 routes"*, *"compare my servers"*, *"audyt serwera"*, *"sprawdź bezpieczeństwo VPS"*. The skill also fits after an incident (leaked
 key, unexpected login, outage), to find what else is wrong.
 
-A run has eight steps:
+**Two modes.** *Full* — "audit this server", after an incident, "compare my servers" — runs every step
+below and writes `report.md` and `findings.json`. *Focused* is for one question ("is Docker bypassing
+ufw?"): only the matching inventory sections, an answer in chat with confidence labels, no report and
+no saved run. It offers a full audit if it turns up a HIGH finding. When a request could be either, the
+skill asks.
+
+A full run has eight steps:
 
 1. **Scope.** One batch of questions: which host, is there a second machine for the outside-in
    test, which hostnames sit behind a CDN, what is off-limits. Answers are pre-filled from project

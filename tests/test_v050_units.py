@@ -318,3 +318,35 @@ class Reconcile(unittest.TestCase):
         with open(out) as fh:
             self.assertEqual(json.load(fh)["verification"], "same-agent-fallback")
         self.assertEqual(sorted(os.listdir(self.dir)), ["draft.json", "findings.json", "v.jsonl"])
+
+
+class Modes(unittest.TestCase):
+    def test_mode_table_names_real_sections_and_checks(self):
+        import re
+        root = os.path.join(HERE, "..")
+        with open(os.path.join(root, "SKILL.md")) as fh:
+            skill = fh.read()
+        modes = skill.split("## Modes", 1)[1].split("\n## ", 1)[0]
+        rows = [l for l in modes.splitlines() if l.startswith("| ") and not l.startswith("| Question") and "---" not in l]
+        self.assertGreaterEqual(len(rows), 10)
+        with open(os.path.join(SCRIPTS, "collect.py")) as fh:
+            collect = fh.read()
+        sections = set(re.findall(r"\bsec_(\w+)", collect.split("SECTIONS = [", 1)[1].split("]", 1)[0]))
+        with open(os.path.join(root, "references", "checks.md")) as fh:
+            headings = [l[3:].strip() for l in fh if l.startswith("## ") and l[3:4].isdigit()]
+        for row in rows:
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            self.assertEqual(len(cells), 4, row)
+            for name in re.findall(r"[a-z]+", cells[1].split("(")[0]):
+                self.assertIn(name, sections, "%s: not a collect.py section" % name)
+            for entry in cells[2].split(";"):
+                entry = entry.strip()
+                self.assertTrue(any(h.startswith(entry) for h in headings), "%r is not a checks.md section" % entry)
+            self.assertIn("HIGH", cells[3])
+
+    def test_description_mentions_both_uses_and_stays_short(self):
+        with open(os.path.join(HERE, "..", "SKILL.md")) as fh:
+            desc = next(l for l in fh if l.startswith("description: "))
+        self.assertIn("full audit", desc)
+        self.assertIn("focused question", desc)
+        self.assertLess(len(desc), 1200)
