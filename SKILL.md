@@ -139,8 +139,11 @@ root is one HIGH path, not four separate notes. Rate the path; list its findings
 ### 6. Report
 
 Fill `references/report-template.md`, save `report.md` (600) in the audit directory, check it with
-`find_secrets.py`, and reply in the operator's language with: the top findings (one line each), the
-questions only the operator can answer, the report path, and "which fixes should I apply?".
+`find_secrets.py`. Write `findings.json` (600) next to it — required in a full audit, same ids,
+severities and statuses as `report.md` — and check it: `python3 -I <skill>/scripts/validate_findings.py
+<run>/findings.json` must exit 0 before you reply (contract: `references/findings-schema.json`). Then
+reply in the operator's language with: the top findings (one line each), the questions only the
+operator can answer, the report path, and "which fixes should I apply?".
 
 Severity = reachability × impact:
 
@@ -213,6 +216,9 @@ values, no fingerprints. Point to the report path instead of copying it.
 - **`scripts/probe_external.sh`** — outside-in probe for one target: open ports, what answers
   (plain HTTP on admin ports, SSH auth methods offered, mail banners), TLS versions/HSTS/cert, CDN
   origin bypass, URL expectation matrix, IPv4 vs IPv6 port comparison. bash + curl + openssl only.
+- **`scripts/validate_findings.py <run>/findings.json`** — checks the findings contract
+  (`references/findings-schema.json`): shape, severity vs the table, `confirm_by`, ids, attack paths,
+  the backup ladder, and no secret or fingerprint in any string. Exit 0/1/2, `--quiet`. Writes nothing.
 - **`scripts/secretlib.py`** — shared detection/masking; tests in `tests/` (`python3 -m unittest
   discover -s tests`). Extend its patterns when a new secret format shows up, with a test.
 

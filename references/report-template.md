@@ -59,15 +59,32 @@ n. <lockout-prone fixes last, one at a time>
 Waiting for approval — nothing has been changed.
 ```
 
-Optional `findings.json` next to the report (mode 600, same leak check), for dashboards and for
-tracking status across audits — one object per finding, no secret values, no fingerprints:
+`findings.json` next to the report (mode 600, same leak check) is required in a full audit: the
+machine-readable twin of `report.md`, with the same ids, severities and statuses. Its contract is
+[findings-schema.json](findings-schema.json); check it before the chat summary:
+`python3 -I <skill>/scripts/validate_findings.py <run>/findings.json` (exit 0 = valid). No secret
+values and no fingerprints (`fp=`, `xfp=`); masked forms such as `<REDACTED>` are fine. A minimal
+valid example:
 
 ```json
-{"host": "<hostname>", "date": "YYYY-MM-DD", "skill_version": "0.4.4",
- "findings": [{"id": 1, "title": "…", "severity": "HIGH", "confidence": "verified-outside",
-               "area": "exposure", "status": "open", "path": "A"}],
+{"host": "web1", "date": "2026-11-10", "skill_version": "0.5.0", "run_dir": "~/.server-audit/web1-2026-11-10",
+ "mode": "full",
+ "findings": [
+  {"id": 1, "title": "Redis on a public address without auth", "area": "exposure", "severity": "HIGH",
+   "confidence": "verified-outside", "status": "open", "path": "A",
+   "reachability": "internet-no-auth", "impact": "data-or-control",
+   "evidence": [{"command": "ss -tlnp 'sport = :6379'", "observation": "0.0.0.0:6379 redis-server", "where": "inside"},
+                {"command": "probe_external.sh 203.0.113.10", "observation": "6379 open, PING answered", "where": "outside"}],
+   "verifier": null},
+  {"id": 2, "title": "Docker publishes the Redis port past ufw", "area": "exposure", "severity": "MEDIUM",
+   "confidence": "verified-inside", "status": "open", "path": "A",
+   "reachability": "internet-one-control", "impact": "data-or-control",
+   "evidence": [{"command": "iptables -t nat -S DOCKER", "observation": "DNAT tcp dpt:6379", "where": "inside"}],
+   "verifier": null}],
+ "rejected": [{"id": 3, "title": "Port 8080 open", "reason": "bound to 127.0.0.1 (ss -tlnp)"}],
  "backup_ladder": {"exists": true, "fresh": true, "offsite": false, "encrypted": null,
-                  "deletable_from_host": null, "restore_tested": null}}
+                   "deletable_from_host": null, "restore_tested": null},
+ "not_checked": ["offsite backup copy (needs the operator)"]}
 ```
 
 Chat summary (the reply to the operator, not the file): the top findings with severity in one line

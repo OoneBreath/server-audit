@@ -2,6 +2,28 @@
 
 ## 0.5.0 (unreleased)
 
+- **`findings.json` is a contract.** It is required in a full audit, next to `report.md` and with the
+  same ids, severities and statuses, and it is checked before the chat summary.
+  - **The schema.** `references/findings-schema.json` documents it; nothing loads it at run time. It
+    adds `mode`, `run_dir`, `rejected[]` (dropped false positives, so the drop is explicit),
+    `not_checked[]`, and per finding: `reachability`, `impact`, `evidence[]` (command, observation,
+    inside/outside), `confirm_by` and `verifier`.
+  - **The validator.** `scripts/validate_findings.py`, stdlib only, no network, writes nothing. It
+    checks that:
+    - severity matches the reachability × impact table: the MEDIUM–HIGH cell accepts both, one level
+      off needs `adjust_reason`, two levels off is never valid, and a hardening gap that needs root
+      is INFO only;
+    - `confirm_by` is present for inferred or partial findings;
+    - ids are unique across findings and rejected;
+    - an attack path joins at least two findings;
+    - `restore_tested: true` comes with a restore in the evidence;
+    - no string carries a secret (secretlib) or a fingerprint (`fp=`, `xfp=`). Masked forms such as
+      `<REDACTED>` pass.
+    
+    Exit 0 = valid, 1 = invalid (`path: message`), 2 = unreadable; `--quiet`.
+  - **Docs and tests.** `report-template.md` now points to the schema and has one minimal valid
+    example, which a test checks. Tests are in `tests/test_v050_units.py`, and the script is in
+    `test_invariants`.
 - CI: the Python 3.9 unit job runs on `ubuntu-24.04`. setup-python has no 3.9 for `ubuntu-latest` (now
   Ubuntu 26.04), so the next run on the old matrix would have failed before any test ran.
 

@@ -1,7 +1,7 @@
 """Guarantees the skill makes, enforced on the source code.
 
-1. The scripts that read secrets or host state (collect.py, find_secrets.py, secretlib.py, diff_state.py)
-   contain no network code. dns_check.py does DNS lookups only and reads/writes no files.
+1. The scripts that read secrets or host state (collect.py, find_secrets.py, secretlib.py, diff_state.py,
+   validate_findings.py) contain no network code. dns_check.py does DNS lookups only and reads/writes no files.
 2. collect.py only runs commands from an explicit read-only allowlist. Adding a command means adding
    it here on purpose, where a reviewer sees it.
 3. collect.py writes only inventory.txt and state.json in its own output directory (one write helper);
@@ -45,7 +45,7 @@ GIT_READ_ONLY = {"remote", "rev-parse", "ls-files"}
 
 class Invariants(unittest.TestCase):
     def test_no_network_code_where_secrets_are_read(self):
-        for name in ("collect.py", "find_secrets.py", "secretlib.py", "diff_state.py"):
+        for name in ("collect.py", "find_secrets.py", "secretlib.py", "diff_state.py", "validate_findings.py"):
             for i, line in enumerate(src(name).splitlines(), 1):
                 self.assertIsNone(NETWORK.search(line), "%s:%d has network code: %s" % (name, i, line.strip()))
 
@@ -90,6 +90,10 @@ class Invariants(unittest.TestCase):
 
     def test_diff_state_writes_nothing(self):
         self.assertNotRegex(src("diff_state.py"), r"open\([^)]*,\s*[\"'][wa]")
+
+    def test_validate_findings_writes_nothing_and_runs_nothing(self):
+        s = src("validate_findings.py")
+        self.assertNotRegex(s, r"open\([^)]*,\s*[\"'][wa]|os\.(remove|unlink|rename|replace)|shutil\.|subprocess")
 
     def test_probe_refuses_self(self):
         s = src("probe_external.sh")
