@@ -45,7 +45,8 @@ GIT_READ_ONLY = {"remote", "rev-parse", "ls-files"}
 
 class Invariants(unittest.TestCase):
     def test_no_network_code_where_secrets_are_read(self):
-        for name in ("collect.py", "find_secrets.py", "secretlib.py", "diff_state.py", "validate_findings.py"):
+        for name in ("collect.py", "find_secrets.py", "secretlib.py", "diff_state.py", "validate_findings.py",
+                     "coverage.py", "reconcile.py"):
             for i, line in enumerate(src(name).splitlines(), 1):
                 self.assertIsNone(NETWORK.search(line), "%s:%d has network code: %s" % (name, i, line.strip()))
 
@@ -90,6 +91,12 @@ class Invariants(unittest.TestCase):
 
     def test_diff_state_writes_nothing(self):
         self.assertNotRegex(src("diff_state.py"), r"open\([^)]*,\s*[\"'][wa]")
+
+    def test_coverage_writes_only_its_file_and_runs_nothing(self):
+        s = src("coverage.py")
+        self.assertEqual(len(re.findall(r"\bos\.open\(", s)), 1)
+        self.assertIn("os.O_EXCL", s)                                              # never overwrites
+        self.assertNotRegex(s, r"(?<!fd)open\([^)]*,\s*[\"'][wa]|os\.(remove|unlink|rename|replace)|shutil\.|subprocess")
 
     def test_reconcile_writes_only_out_and_runs_nothing(self):
         s = src("reconcile.py")

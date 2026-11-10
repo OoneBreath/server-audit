@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """validate_findings.py — check a run's findings.json against the contract (references/findings-schema.json).
 
-    python3 -I validate_findings.py <run>/findings.json [--quiet]
+    python3 -I validate_findings.py <run>/findings.json [--coverage <run>/coverage.json] [--quiet]
 
 Exit 0 = valid, 1 = invalid (each problem printed as `path: message`), 2 = unreadable input.
 Stdlib only. No network, and it writes nothing but stdout/stderr.
@@ -240,18 +240,25 @@ def validate(doc):
 
 
 def main(argv):
-    args = [a for a in argv if not a.startswith("-")]
     quiet = "--quiet" in argv
-    if len(args) != 1:
-        print("usage: validate_findings.py <findings.json> [--quiet]", file=sys.stderr)
+    cov_path = argv[argv.index("--coverage") + 1] if "--coverage" in argv and argv.index("--coverage") + 1 < len(argv) else None
+    args = [a for i, a in enumerate(argv) if not a.startswith("-") and not (i and argv[i - 1] == "--coverage")]
+    if len(args) != 1 or ("--coverage" in argv and not cov_path):
+        print("usage: validate_findings.py <findings.json> [--coverage <coverage.json>] [--quiet]", file=sys.stderr)
         return 2
-    try:
-        with open(args[0], encoding="utf-8") as fh:
-            doc = json.load(fh)
-    except (OSError, ValueError) as e:
-        print("%s: unreadable (%s)" % (args[0], type(e).__name__), file=sys.stderr)
-        return 2
+    loaded = []
+    for path in [args[0]] + ([cov_path] if cov_path else []):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                loaded.append(json.load(fh))
+        except (OSError, ValueError) as e:
+            print("%s: unreadable (%s)" % (path, type(e).__name__), file=sys.stderr)
+            return 2
+    doc, cov = loaded[0], (loaded[1] if cov_path else None)
     problems = validate(doc)
+    if cov is not None:
+        import coverage  # noqa: E402  (coverage.py imports this module; import it only when asked)
+        problems += ["coverage.json " + p for p in coverage.validate(cov, doc)]
     if problems:
         for line in problems:
             print(line)
