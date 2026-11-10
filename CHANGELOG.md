@@ -2,6 +2,25 @@
 
 ## 0.5.0 (unreleased)
 
+- **Independent verification.** Until now the agent that found a candidate also verified it, so the
+  audit graded its own work. Now a fresh agent tries to disprove each finding before it reaches the
+  report.
+  - **What goes out.** Every HIGH/MEDIUM finding and every attack-path finding is sent, plus LOW/INFO
+    when there are 15 findings or fewer. Batches hold at most 5 findings, grouped by path or area.
+  - **The verifier.** It sees only the claims, the run's files and the matching `checks.md` sections,
+    not the auditor's reasoning. It inherits hard rules 1–4 word for word. It may run at most 3
+    read-only commands from an allowlist, and that allowlist is an instruction in its prompt, not a
+    sandbox.
+  - **Docs.** `references/verification.md` has the procedure and a ready prompt; SKILL.md step 5
+    points to it.
+  - **`scripts/reconcile.py`** applies the verdicts. A material change (severity ±2 levels or a new
+    reachability class) goes to a second verifier, whose verdict is final. A rejection moves the
+    finding to `rejected[]`, unless the auditor disputes it with `--keep ID="why"`; then it stays, at
+    best `verified-partial`. A path left with one finding is cleared. Malformed verifier output fails
+    closed (`verifier.verdict: "error"`). It writes only `--out` (600).
+  - **The contract.** `findings.json` gains `verification`: `independent`, `same-agent-fallback`
+    (no subagents: a separate pass rebuilt from the files) or `none`.
+  - **The report.** It carries the summary line and lists the rejected items under "What is fine".
 - **`findings.json` is a contract.** It is required in a full audit, next to `report.md` and with the
   same ids, severities and statuses, and it is checked before the chat summary.
   - **The schema.** `references/findings-schema.json` documents it; nothing loads it at run time. It

@@ -33,7 +33,7 @@ def finding(fid, **kw):
 
 VALID = {
     "host": "web1", "date": "2026-11-10", "skill_version": "0.5.0", "run_dir": "~/.server-audit/web1-2026-11-10",
-    "mode": "full",
+    "mode": "full", "verification": "independent",
     "findings": [
         finding(1, path="A"),
         finding(2, title="Docker publishes the Redis port past ufw", area="exposure", severity="MEDIUM",
@@ -170,8 +170,8 @@ class SchemaAndDocs(unittest.TestCase):
         self.assertEqual(props["confidence"]["enum"], vf.CONFIDENCE)
         self.assertEqual(props["reachability"]["enum"], vf.REACHABILITY)
         self.assertEqual(props["impact"]["enum"], vf.IMPACT)
-        self.assertEqual(set(schema["required"]), {"host", "date", "skill_version", "run_dir", "mode", "findings",
-                                                   "rejected", "backup_ladder", "not_checked"})
+        self.assertEqual(set(schema["required"]), {"host", "date", "skill_version", "run_dir", "mode", "verification",
+                                                   "findings", "rejected", "backup_ladder", "not_checked"})
 
     def test_one_area_per_checks_md_section(self):
         with open(os.path.join(HERE, "..", "references", "checks.md")) as fh:
@@ -187,3 +187,134 @@ class SchemaAndDocs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import reconcile as rc  # noqa: E402
+
+
+def draft():
+    d = copy.deepcopy(VALID)
+    d["verification"] = "none"
+    for f in d["findings"]:
+        f["verifier"] = None
+    return d
+
+
+class Reconcile(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir)
+
+    def jsonl(self, name, *lines):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            fh.write("\n".join(l if isinstance(l, str) else json.dumps(l) for l in lines) + "\n")
+        return path
+
+    def run_rc(self, lines, second=None, keep=None, same=False):
+        first = [self.jsonl("v1.jsonl", *lines)]
+        sec = [self.jsonl("v2.jsonl", *second)] if second else None
+        return rc.reconcile(draft(), first, sec, keep, same)
+
+    def by_id(self, doc, fid):
+        return next(f for f in doc["findings"] if f["id"] == fid)
+
+    def test_upheld_records_the_verdict_and_adds_evidence(self):
+        ev = {"command": "ss -tlnp 'sport = :6379'", "observation": "0.0.0.0:6379", "where": "inside"}
+        doc, s = self.run_rc([{"id": 1, "verdict": "upheld", "severity": "HIGH", "confidence": "verified-outside",
+                               "note": "still listening on all interfaces", "evidence": [ev]}])
+        f = self.by_id(doc, 1)
+        self.assertEqual(f["verifier"], {"verdict": "upheld", "note": "still listening on all interfaces"})
+        self.assertEqual(f["evidence"][-1], ev)
+        self.assertEqual((s["checked"], s["counts"]["upheld"], doc["verification"]), (1, 1, "independent"))
+        self.assertEqual(list(vf.validate(doc)), [])
+
+    def test_downgrade_applies_and_one_level_off_table_gets_adjust_reason(self):
+        doc, s = self.run_rc([{"id": 1, "verdict": "downgraded", "severity": "MEDIUM", "confidence": "verified-inside",
+                               "note": "a CDN-only firewall rule limits it"}])
+        f = self.by_id(doc, 1)
+        self.assertEqual((f["severity"], f["confidence"]), ("MEDIUM", "verified-inside"))
+        self.assertEqual(f["adjust_reason"], "verifier: a CDN-only firewall rule limits it")
+        self.assertEqual(s["needs_second"], [])
+        self.assertEqual(list(vf.validate(doc)), [])
+
+    def test_material_change_needs_a_second_verifier_whose_verdict_is_final(self):
+        drop = {"id": 1, "verdict": "downgraded", "severity": "LOW", "confidence": "verified-inside",
+                "note": "redis requires a password"}
+        _, s = self.run_rc([drop])
+        self.assertEqual(s["needs_second"], [1])
+        moved = {"id": 2, "verdict": "changed", "severity": "MEDIUM", "confidence": "verified-inside",
+                 "reachability": "local-users", "note": "the port is not published"}
+        _, s = self.run_rc([moved])
+        self.assertEqual(s["needs_second"], [2])                      # reachability class changed
+        second = {"id": 1, "verdict": "upheld", "severity": "HIGH", "confidence": "verified-outside",
+                  "note": "no password: PING answers without AUTH"}
+        doc, s = self.run_rc([drop], second=[second])
+        self.assertEqual(s["needs_second"], [])
+        self.assertEqual(self.by_id(doc, 1)["severity"], "HIGH")
+        self.assertEqual(self.by_id(doc, 1)["verifier"]["verdict"], "upheld")
+
+    def test_rejected_moves_to_rejected_and_a_lone_path_is_cleared(self):
+        doc, s = self.run_rc([{"id": 2, "verdict": "rejected", "note": "DOCKER-USER drops it before DNAT"}])
+        self.assertNotIn(2, [f["id"] for f in doc["findings"]])
+        self.assertIn({"id": 2, "title": "Docker publishes the Redis port past ufw",
+                       "reason": "independent verifier: DOCKER-USER drops it before DNAT"}, doc["rejected"])
+        self.assertIsNone(self.by_id(doc, 1)["path"])                  # path A had #1 and #2
+        self.assertTrue(any("attack path A" in n for n in s["notes"]))
+        self.assertEqual(list(vf.validate(doc)), [])
+
+    def test_keep_disputes_a_rejection_and_caps_confidence(self):
+        doc, s = self.run_rc([{"id": 1, "verdict": "rejected", "note": "bound to 127.0.0.1"}],
+                             keep={1: "outside-in probe answered PING"})
+        f = self.by_id(doc, 1)
+        self.assertEqual(f["confidence"], "verified-partial")
+        self.assertIn("auditor keeps it: outside-in probe answered PING", f["verifier"]["note"])
+        self.assertTrue(f["confirm_by"])
+        self.assertEqual(s["kept"], [1])
+        self.assertEqual(list(vf.validate(doc)), [])
+
+    def test_malformed_verifier_output_fails_closed(self):
+        before = self.by_id(draft(), 4)
+        bad = [
+            "not json at all",
+            {"id": 4, "verdict": "fine", "severity": "LOW", "confidence": "verified-inside", "note": "x"},
+        ]
+        doc, s = self.run_rc(bad)
+        f = self.by_id(doc, 4)
+        self.assertEqual(f["verifier"]["verdict"], "error")
+        self.assertEqual({k: f[k] for k in ("severity", "confidence", "evidence")},
+                         {k: before[k] for k in ("severity", "confidence", "evidence")})
+        self.assertTrue(any("not JSON" in n for n in s["notes"]))
+        for line in ({"id": 4, "verdict": "upheld", "severity": "LOW", "confidence": "verified-inside",
+                      "note": "key is " + FAKE_STRIPE},                                   # a secret
+                     {"id": 4, "verdict": "upheld", "severity": "LOW", "confidence": "verified-inside",
+                      "note": "same key fp=1a2b3c4d"},                                     # a fingerprint
+                     {"id": 4, "verdict": "upheld", "severity": "LOW", "confidence": "verified-inside",
+                      "note": "ok", "extra": 1}):                                          # unknown key
+            doc, _ = self.run_rc([line])
+            self.assertEqual(self.by_id(doc, 4)["verifier"]["verdict"], "error", line)
+            self.assertNotIn(FAKE_STRIPE, json.dumps(doc))
+        ok = {"id": 4, "verdict": "upheld", "severity": "LOW", "confidence": "verified-inside", "note": "ok"}
+        doc, _ = self.run_rc([ok, ok])                                                     # duplicate verdicts
+        self.assertEqual(self.by_id(doc, 4)["verifier"]["verdict"], "error")
+
+    def test_cli_writes_only_out_with_mode_600_and_prints_the_summary(self):
+        d = os.path.join(self.dir, "draft.json")
+        with open(d, "w") as fh:
+            json.dump(draft(), fh)
+        v = self.jsonl("v.jsonl", {"id": 1, "verdict": "upheld", "severity": "HIGH", "confidence": "verified-outside",
+                                   "note": "confirmed"},
+                       {"id": 2, "verdict": "rejected", "note": "not published"})
+        out = os.path.join(self.dir, "findings.json")
+        r = subprocess.run([sys.executable, "-I", os.path.join(SCRIPTS, "reconcile.py"), d, v, "--out", out,
+                            "--same-agent"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("2 finding(s) checked by an independent verifier: 1 upheld, 0 downgraded, 0 changed, 1 rejected",
+                      r.stdout)
+        self.assertEqual(oct(os.stat(out).st_mode & 0o777), "0o600")
+        with open(out) as fh:
+            self.assertEqual(json.load(fh)["verification"], "same-agent-fallback")
+        self.assertEqual(sorted(os.listdir(self.dir)), ["draft.json", "findings.json", "v.jsonl"])
