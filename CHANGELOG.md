@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.0: findings are challenged, the contract is checked
+
+Released 10 November 2026. What changed:
+- an independent verifier tries to disprove every HIGH/MEDIUM finding before the report;
+- `findings.json` is a required, validated contract;
+- one question no longer runs the whole audit (focused vs full);
+- severity has anchors;
+- each run records what it covered.
+
+All 12 lab findings keep their severity and confidence: the lab end-to-end test passes unchanged, and
+the anchors were checked against `examples/report-lab.md`.
+
 
 - **Coverage ledger.** "Not checked" was free prose. It is now `coverage.json` in each full run, with
   one entry per `checks.md` area: `checked`, `degraded` (no root, a missing tool, a failed section),
