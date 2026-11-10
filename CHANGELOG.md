@@ -2,6 +2,18 @@
 
 ## 0.5.0 (unreleased)
 
+- **Severity anchors.** The reachability × impact table stays as it is. Under it:
+  - **Examples per level, for Linux hosts:** public Redis/Postgres without auth, `.env` over HTTP, a
+    leaked secret that still works → HIGH; a sudo rule that is root in disguise, basic auth over
+    plain HTTP, backups not offsite → MEDIUM; a stale ufw rule, a missing HSTS header → LOW; root-only
+    → INFO.
+  - **A HIGH-vs-MEDIUM question:** can someone on the internet get data or control today without
+    guessing a password?
+  - **A rule:** if you can't state the concrete damage in one sentence, the severity is lower than it
+    feels.
+  
+  All 12 findings of `examples/report-lab.md` keep their severity. A test checks every anchor against
+  the validator's table.
 - **Two modes: full and focused.** A question such as "is Docker bypassing ufw" no longer triggers the
   whole workflow.
   - **The table.** SKILL.md's new "Modes" section maps each kind of question to `collect.py --only`

@@ -350,3 +350,32 @@ class Modes(unittest.TestCase):
         self.assertIn("full audit", desc)
         self.assertIn("focused question", desc)
         self.assertLess(len(desc), 1200)
+
+
+class SeverityAnchors(unittest.TestCase):
+    # (anchor from SKILL.md, impact, reachability, severity): each must be allowed by the validator's table
+    ANCHORS = [
+        ("Redis/Postgres on a public address without auth", "data-or-control", "internet-no-auth", "HIGH"),
+        (".env or .git served over HTTP by the proxy", "data-or-control", "internet-no-auth", "HIGH"),
+        ("admin panel open to the internet without a login", "data-or-control", "internet-no-auth", "HIGH"),
+        ("Docker socket in an internet-facing container", "data-or-control", "internet-one-control", "HIGH"),
+        ("a leaked secret that still works", "data-or-control", "internet-no-auth", "HIGH"),
+        ("sudo rule that is root in disguise for a login account", "data-or-control", "local-users", "MEDIUM"),
+        ("admin route behind basic auth alone, over HTTP", "data-or-control", "internet-one-control", "MEDIUM"),
+        ("backups that are not offsite", "availability", "internet-one-control", "MEDIUM"),
+        ("ufw allow rule with nothing listening", "hardening", "internet-no-auth", "LOW"),
+        ("missing HSTS header", "hardening", "internet-no-auth", "LOW"),
+        ("password auth offered, only key accounts", "hardening", "internet-no-auth", "LOW"),
+        ("anything only root can reach", "data-or-control", "needs-root", "INFO"),
+    ]
+
+    def test_anchors_agree_with_the_table(self):
+        for name, impact, reach, sev in self.ANCHORS:
+            self.assertIn(sev, vf.TABLE[impact][reach], name)
+
+    def test_skill_md_carries_the_anchors_and_the_rules(self):
+        with open(os.path.join(HERE, "..", "SKILL.md")) as fh:
+            skill = fh.read()
+        for phrase in ("Anchors on Linux hosts", "without guessing a password", "in one sentence",
+                       "Docker socket", "missing HSTS header", "only root can reach"):
+            self.assertIn(phrase, skill)

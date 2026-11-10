@@ -201,6 +201,28 @@ Raise one level for: weak/default/shared credentials, already-leaked secrets, no
 Things outside the host (renewal, offsite backups, provider 2FA) go under "needs the operator" with
 a rating of their consequence — an unpaid renewal is a full outage.
 
+Anchors on Linux hosts (the table decides; these show where typical findings land):
+- **HIGH:**
+  - Redis or Postgres on a public address without auth;
+  - `.env` or `.git` served over HTTP by the proxy;
+  - an admin panel open to the internet without a login;
+  - the Docker socket mounted into an internet-facing container;
+  - a leaked secret that still works.
+- **MEDIUM:**
+  - a sudo rule that is root in disguise (shell escape, an editable script) for a non-root login account;
+  - an admin route behind basic auth alone, over plain HTTP;
+  - backups that are not offsite.
+- **LOW:**
+  - a ufw allow rule with nothing listening behind it;
+  - a missing HSTS header;
+  - SSH offering password auth while every account is key-only.
+- **INFO:** anything only root can reach.
+
+HIGH or MEDIUM? Ask: can someone on the internet get data or control **today**, with what you verified,
+without guessing a password? Yes → HIGH. If one more control has to fail first → MEDIUM. Then apply the
+raise/lower rules above. And if you can't say the concrete damage in one sentence, the severity is lower
+than it feels.
+
 ### 7. Fix (only after approval)
 
 Present a numbered plan: low-risk fixes first, lockout-prone ones (SSH, firewall) last and one at a
