@@ -91,6 +91,14 @@ class Invariants(unittest.TestCase):
     def test_diff_state_writes_nothing(self):
         self.assertNotRegex(src("diff_state.py"), r"open\([^)]*,\s*[\"'][wa]")
 
+    def test_reconcile_writes_only_out_and_runs_nothing(self):
+        s = src("reconcile.py")
+        self.assertIsNone(NETWORK.search(s))
+        self.assertEqual(len(re.findall(r"\bos\.open\(", s)), 1)                     # the one write: --out, 0600
+        self.assertNotRegex(s, r"(?<!fd)open\([^)]*,\s*[\"'][wa]")              # no other file opened for writing
+        self.assertIn("fd = os.open(out,", s)
+        self.assertNotRegex(s, r"os\.(remove|unlink|rename|replace)|shutil\.|subprocess")
+
     def test_validate_findings_writes_nothing_and_runs_nothing(self):
         s = src("validate_findings.py")
         self.assertNotRegex(s, r"open\([^)]*,\s*[\"'][wa]|os\.(remove|unlink|rename|replace)|shutil\.|subprocess")

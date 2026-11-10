@@ -135,6 +135,15 @@ root is one HIGH path, not four separate notes. Rate the path; list its findings
   open on only one protocol; it says so when the probing machine has no IPv6 route.
 - Proxy-level rules (auth, path matchers) do not depend on the source, so requests through the public hostname
   from the host itself are a valid inside view of them; firewall and `remote_ip` rules are not (see remediation.md).
+- **Independent verification, before step 6.**
+  - **What goes out.** Every HIGH and MEDIUM finding, and every finding on an attack path, goes to a
+    fresh verifier that tries to disprove it. In a full audit with 15 findings or fewer, send LOW/INFO
+    too; with more, batch those into one verifier. Batches hold at most 5 findings, grouped by path or
+    area.
+  - **How.** Write the draft as `findings.draft.json`, give each verifier the prompt from
+    `references/verification.md`, and merge the replies with `scripts/reconcile.py`.
+  - **Without subagents.** Do a separate pass rebuilt only from the run's files, and pass
+    `--same-agent`; the report then says so.
 
 ### 6. Report
 
@@ -219,6 +228,9 @@ values, no fingerprints. Point to the report path instead of copying it.
 - **`scripts/validate_findings.py <run>/findings.json`** — checks the findings contract
   (`references/findings-schema.json`): shape, severity vs the table, `confirm_by`, ids, attack paths,
   the backup ladder, and no secret or fingerprint in any string. Exit 0/1/2, `--quiet`. Writes nothing.
+- **`scripts/reconcile.py DRAFT VERIFIER.jsonl… --out findings.json`** — applies the verifiers' verdicts
+  (upheld / downgraded / changed / rejected), lists material changes for a second verifier (`--second`),
+  `--keep ID="why"` to dispute a rejection; malformed verifier output fails closed. Writes only `--out`.
 - **`scripts/secretlib.py`** — shared detection/masking; tests in `tests/` (`python3 -m unittest
   discover -s tests`). Extend its patterns when a new secret format shows up, with a test.
 
@@ -232,5 +244,7 @@ values, no fingerprints. Point to the report path instead of copying it.
   Docker port binding, proxy auth, secret rotation order, persistence, backups.
 - **`references/report-template.md`** — report structure (attack paths, backup ladder, drift) and
   the chat summary format.
+- **`references/verification.md`** — the independent verifier: what goes to it, what it sees, the
+  ready-to-use prompt (hard rules 1–4 included), and how `reconcile.py` applies its verdicts.
 - **`lab/ubuntu`, `lab/rhel`** — deliberately misconfigured containers with fake secrets: the end-to-end test
   (`SERVER_AUDIT_E2E=1 python3 -m unittest tests.test_lab_e2e`) and a safe target for demos.

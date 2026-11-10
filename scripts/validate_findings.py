@@ -29,7 +29,8 @@ STATUS = ["open", "fixed", "accepted", "needs-operator"]
 REACHABILITY = ["internet-no-auth", "internet-one-control", "local-users", "needs-root"]
 IMPACT = ["data-or-control", "availability", "hardening"]
 WHERE = ["inside", "outside"]
-VERIFIER_VERDICTS = ["upheld", "downgraded", "rejected", "changed"]
+VERIFIER_VERDICTS = ["upheld", "downgraded", "rejected", "changed", "error"]
+VERIFICATION = ["independent", "same-agent-fallback", "none"]
 MODES = ["full", "focused"]
 # The areas of references/checks.md (section → area id).
 AREAS = ["exposure", "proxy", "ssh", "users", "secrets", "services", "updates", "tls", "backups", "detection",
@@ -133,6 +134,7 @@ def validate(doc):
     _str(p, "$", doc, "skill_version")
     _str(p, "$", doc, "run_dir")
     _enum(p, "$", doc, "mode", MODES)
+    _enum(p, "$", doc, "verification", VERIFICATION)
 
     findings = doc.get("findings")
     if not isinstance(findings, list):

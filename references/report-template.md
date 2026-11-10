@@ -15,6 +15,8 @@ Nothing on the host was changed during the audit.
 
 ## Summary
 <3–5 sentences: the most important risk in plain words, what is fine, what needs the operator.>
+<The line from reconcile.py, e.g. "7 findings checked by an independent verifier: 5 upheld, 1 downgraded,
+0 changed, 1 rejected" — or "checked by the same agent in a separate pass (no subagents)".>
 
 | # | Severity | Finding | Confidence |
 |---|---|---|---|
@@ -48,6 +50,8 @@ and which are not — unexplained ones are findings. "Baseline run" if there was
 ## What is fine
 <Short list of checks that passed and matter: e.g. "SSH keys only from outside", "no unauthenticated
 data endpoints", "backups fresh and non-empty".>
+<False positives: every item of findings.json `rejected[]`, with its reason — including the ones an
+independent verifier rejected.>
 
 ## Not checked / needs the operator
 - <yes/no questions: renewal, offsite backup, keys still in use, repo visibility, …>
@@ -68,7 +72,7 @@ valid example:
 
 ```json
 {"host": "web1", "date": "2026-11-10", "skill_version": "0.5.0", "run_dir": "~/.server-audit/web1-2026-11-10",
- "mode": "full",
+ "mode": "full", "verification": "independent",
  "findings": [
   {"id": 1, "title": "Redis on a public address without auth", "area": "exposure", "severity": "HIGH",
    "confidence": "verified-outside", "status": "open", "path": "A",

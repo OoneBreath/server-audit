@@ -4,13 +4,14 @@
   "title": "server-audit findings.json",
   "description": "The machine-readable twin of report.md, written in every full audit next to it (mode 600) and checked with `python3 -I scripts/validate_findings.py <run>/findings.json` before the chat summary. Documentation only: the validator implements these rules by hand, no JSON Schema library is used. No secret values and no fingerprints (fp=, xfp=) anywhere; masked forms such as <REDACTED> are fine.",
   "type": "object",
-  "required": ["host", "date", "skill_version", "run_dir", "mode", "findings", "rejected", "backup_ladder", "not_checked"],
+  "required": ["host", "date", "skill_version", "run_dir", "mode", "verification", "findings", "rejected", "backup_ladder", "not_checked"],
   "properties": {
     "host": {"type": "string"},
     "date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
     "skill_version": {"type": "string"},
     "run_dir": {"type": "string", "description": "the audit directory, e.g. ~/.server-audit/<host>-<date>"},
     "mode": {"enum": ["full", "focused"]},
+    "verification": {"enum": ["independent", "same-agent-fallback", "none"], "description": "who checked the findings before the report (references/verification.md); set by scripts/reconcile.py"},
     "findings": {
       "type": "array",
       "items": {
@@ -50,7 +51,7 @@
             "description": "null until an independent verifier has looked at the finding",
             "required": ["verdict", "note"],
             "properties": {
-              "verdict": {"enum": ["upheld", "downgraded", "rejected", "changed"]},
+              "verdict": {"enum": ["upheld", "downgraded", "rejected", "changed", "error"], "description": "error: the verifier's output was unusable, so the finding stayed as it was"},
               "note": {"type": "string"}
             }
           }
