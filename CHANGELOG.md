@@ -2,6 +2,18 @@
 
 ## 0.5.0 (unreleased)
 
+- **Two modes: full and focused.** A question such as "is Docker bypassing ufw" no longer triggers the
+  whole workflow.
+  - **The table.** SKILL.md's new "Modes" section maps each kind of question to `collect.py --only`
+    sections, the `checks.md` entries to apply, and when a verifier is needed (focused: HIGH only).
+  - **Focused mode.** It answers in chat with the usual confidence labels and writes no report. It
+    sends `collect.py` output to `mktemp -d` and deletes it, so a partial run never becomes the drift
+    baseline of the next full audit. `collect.py` itself is unchanged: with `--only` it still writes
+    `inventory.txt` and a partial `state.json`. A HIGH finding leads to an offer of a full audit.
+  - **When unsure.** The skill asks one question before starting.
+  - **Unchanged.** Hard rules apply to both modes, and the description is rewritten at the same
+    length to name both uses.
+  - **Tests.** A test checks the table against `collect.py`'s sections and `checks.md`'s headings.
 - **Independent verification.** Until now the agent that found a candidate also verified it, so the
   audit graded its own work. Now a fresh agent tries to disprove each finding before it reaches the
   report.
