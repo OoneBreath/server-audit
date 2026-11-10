@@ -88,9 +88,17 @@ def load_run(path):
                 if m and "example?" not in m.group("tags"):
                     secrets.append(m.groupdict())
     meta = state.get("_meta", {})
+    coverage = None
+    cov = os.path.join(os.path.dirname(sp), "coverage.json")
+    if os.path.isfile(cov):
+        try:
+            with open(cov) as f:
+                coverage = json.load(f).get("areas")
+        except (OSError, ValueError):
+            coverage = None
     return {"host": meta.get("host") or os.path.basename(path.rstrip("/")), "collected": meta.get("collected", "?"),
             "root": meta.get("root"), "state": state, "secrets": secrets, "secrets_file": os.path.isfile(sec),
-            "key_id": kid}
+            "key_id": kid, "coverage": coverage}
 
 
 def _g(state, section, key, default=None):
@@ -267,6 +275,19 @@ def compare(runs):
         else:
             lines.append("none: no secret value appears on more than one host (key id %s)" % next(iter(kids)))
     out.append(("the same secret on several hosts", lines))
+
+    if any(by_host[h].get("coverage") for h in hosts):
+        rows = []
+        for h in hosts:
+            cov = by_host[h].get("coverage") or []
+            if not cov:
+                rows.append([h, "?", "no coverage.json in this run", ""])
+                continue
+            def areas(status):
+                return ",".join(e.get("area", "?") for e in cov if isinstance(e, dict) and e.get("status") == status)
+            rows.append([h, "%d/%d" % (sum(1 for e in cov if isinstance(e, dict) and e.get("status") == "checked"), len(cov)),
+                         areas("degraded") or "-", areas("not-checked") or "-"])
+        out.append(("coverage per host", table(["host", "checked", "degraded", "not checked"], rows)))
     return hosts, out, findings
 
 

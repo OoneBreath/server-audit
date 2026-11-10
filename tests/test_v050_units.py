@@ -379,3 +379,126 @@ class SeverityAnchors(unittest.TestCase):
         for phrase in ("Anchors on Linux hosts", "without guessing a password", "in one sentence",
                        "Docker socket", "missing HSTS header", "only root can reach"):
             self.assertIn(phrase, skill)
+
+
+import coverage as cov  # noqa: E402
+
+INVENTORY = """server-audit inventory
+==============================================================================
+== HOST
+==============================================================================
+user: ops (NOT root — partial)
+==============================================================================
+== SSH
+==============================================================================
+(skipped: needs root — rerun with sudo for this section)
+==============================================================================
+== BACKUPS
+==============================================================================
+(section backups failed: OSError: x)
+==============================================================================
+== FIREWALL
+==============================================================================
+ufw not installed
+"""
+
+
+def full_coverage(status="checked"):
+    return {"run": "web1-x", "areas": [{"area": a, "status": status, "reason": "" if status == "checked" else "r"}
+                                       for a in vf.AREAS]}
+
+
+class Coverage(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir)
+
+    def test_valid_coverage(self):
+        self.assertEqual(list(cov.validate(full_coverage(), VALID)), [])
+
+    def test_every_area_exactly_once_and_reasons(self):
+        c = full_coverage()
+        c["areas"].pop()
+        c["areas"].append(dict(c["areas"][0]))
+        p = list(cov.validate(c))
+        self.assertTrue(any("appears 0 times" in x for x in p), p)
+        self.assertTrue(any("appears 2 times" in x for x in p), p)
+        c = full_coverage()
+        c["areas"][3] = {"area": c["areas"][3]["area"], "status": "degraded", "reason": ""}
+        self.assertTrue(any("needs a reason" in x for x in cov.validate(c)))
+        c["areas"][3]["status"] = "half-done"
+        self.assertTrue(any("not one of" in x for x in cov.validate(c)))
+
+    def test_not_checked_areas_must_be_in_the_reports_list(self):
+        c = full_coverage()
+        c["areas"][[e["area"] for e in c["areas"]].index("backups")] = {"area": "backups", "status": "not-checked",
+                                                                       "reason": "no access to the backup host"}
+        doc = copy.deepcopy(VALID)
+        doc["not_checked"] = ["DNS records (no zone access)"]
+        self.assertTrue(any("backups is not-checked" in x for x in cov.validate(c, doc)))
+        doc["not_checked"] = ["Backups & recovery: no access to the backup host"]
+        self.assertEqual(list(cov.validate(c, doc)), [])
+
+    def test_seed_marks_skipped_and_partial_sections_degraded(self):
+        with open(os.path.join(self.dir, "inventory.txt"), "w") as fh:
+            fh.write(INVENTORY)
+        data = cov.seed(self.dir)
+        st = {e["area"]: e["status"] for e in data["areas"]}
+        self.assertEqual(sorted(a for a, s in st.items() if s == "degraded"), ["backups", "ssh", "updates"])
+        self.assertEqual(st["exposure"], "not-checked")          # "ufw not installed" is a fact, not a gap
+        self.assertEqual(st["operator"], "needs-operator")
+        self.assertEqual(len(data["areas"]), len(vf.AREAS))
+
+    def test_seed_cli_writes_600_and_never_overwrites(self):
+        with open(os.path.join(self.dir, "inventory.txt"), "w") as fh:
+            fh.write(INVENTORY)
+        script = os.path.join(SCRIPTS, "coverage.py")
+        r = subprocess.run([sys.executable, "-I", script, "seed", self.dir], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = os.path.join(self.dir, "coverage.json")
+        self.assertEqual(oct(os.stat(out).st_mode & 0o777), "0o600")
+        r = subprocess.run([sys.executable, "-I", script, "seed", self.dir], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+
+    def test_gaps_reads_the_previous_run(self):
+        base = os.path.join(self.dir, "audits")
+        for run, status in (("web1-20261001-0900", "not-checked"), ("web1-20261101-0900", "degraded"),
+                            ("web1-20261110-0900", None), ("db1-20261105-0900", "degraded")):
+            os.makedirs(os.path.join(base, run))
+            if status:
+                c = full_coverage()
+                c["areas"][0] = {"area": "exposure", "status": status, "reason": "no root"}
+                with open(os.path.join(base, run, "coverage.json"), "w") as fh:
+                    json.dump(c, fh)
+        run, items = cov.gaps("web1", base, exclude=os.path.join(base, "web1-20261110-0900"))
+        self.assertEqual(run, "web1-20261101-0900")              # newest earlier run with coverage, same host
+        self.assertEqual(items, [("exposure", "degraded", "no root")])
+        self.assertEqual(cov.gaps("mail1", base), (None, []))
+
+    def test_validate_findings_cli_with_coverage(self):
+        f = os.path.join(self.dir, "findings.json")
+        c = os.path.join(self.dir, "coverage.json")
+        with open(f, "w") as fh:
+            json.dump(VALID, fh)
+        bad = full_coverage()
+        bad["areas"].pop()
+        with open(c, "w") as fh:
+            json.dump(bad, fh)
+        r = subprocess.run([sys.executable, "-I", os.path.join(SCRIPTS, "validate_findings.py"), f, "--coverage", c],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("coverage.json $.areas: area fleet appears 0 times", r.stdout)
+
+    def test_fleet_compare_shows_coverage_per_host(self):
+        import fleet
+        runs = []
+        for host, status in (("web1", "checked"), ("db1", "degraded")):
+            runs.append({"host": host, "collected": "2026-11-10", "root": True, "secrets": [], "secrets_file": False,
+                         "key_id": None, "state": {"_meta": {"host": host}}, "coverage": full_coverage(status)["areas"]})
+        _, sections, _ = fleet.compare(runs)
+        body = dict(sections).get("coverage per host")
+        self.assertTrue(body, [n for n, _ in sections])
+        self.assertTrue(any(l.startswith("db1") and "exposure" in l for l in body), body)

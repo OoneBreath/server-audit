@@ -81,6 +81,9 @@ The hard rules above apply in both modes.
 
 ### 1. Scope (one batch of questions, early)
 
+If an earlier run of this host has a `coverage.json`, start with `python3 -I <skill>/scripts/coverage.py
+gaps <host>`: say what was not covered last time, and give those areas priority.
+
 Pre-fill answers from project memory and the conversation first (if the workspace has a project
 memory such as `.project-brain/`, read its infra/topology and past security topics). Then ask only
 what is still open, in one AskUserQuestion call:
@@ -184,7 +187,11 @@ root is one HIGH path, not four separate notes. Rate the path; list its findings
 Fill `references/report-template.md`, save `report.md` (600) in the audit directory, check it with
 `find_secrets.py`. Write `findings.json` (600) next to it — required in a full audit, same ids,
 severities and statuses as `report.md` — and check it: `python3 -I <skill>/scripts/validate_findings.py
-<run>/findings.json` must exit 0 before you reply (contract: `references/findings-schema.json`). Then
+<run>/findings.json` must exit 0 before you reply (contract: `references/findings-schema.json`). Also
+record the coverage: `coverage.py seed <run>` writes `coverage.json` with every `checks.md` area (skipped or
+partial inventory sections already marked degraded); set each area's status (checked, degraded,
+skipped-by-operator, not-checked, needs-operator) and add `--coverage <run>/coverage.json` to the
+validation, which checks that every not-checked area is named in the Not checked list. Then
 reply in the operator's language with: the top findings (one line each), the questions only the
 operator can answer, the report path, and "which fixes should I apply?".
 
@@ -284,6 +291,8 @@ values, no fingerprints. Point to the report path instead of copying it.
 - **`scripts/validate_findings.py <run>/findings.json`** — checks the findings contract
   (`references/findings-schema.json`): shape, severity vs the table, `confirm_by`, ids, attack paths,
   the backup ladder, and no secret or fingerprint in any string. Exit 0/1/2, `--quiet`. Writes nothing.
+- **`scripts/coverage.py`** — `seed RUN` writes `coverage.json` (one entry per `checks.md` area, seeded
+  from the inventory's skip markers; never overwrites); `gaps HOST` lists what the previous run did not cover.
 - **`scripts/reconcile.py DRAFT VERIFIER.jsonl… --out findings.json`** — applies the verifiers' verdicts
   (upheld / downgraded / changed / rejected), lists material changes for a second verifier (`--second`),
   `--keep ID="why"` to dispute a rejection; malformed verifier output fails closed. Writes only `--out`.

@@ -2,6 +2,17 @@
 
 ## 0.5.0 (unreleased)
 
+- **Coverage ledger.** "Not checked" was free prose. It is now `coverage.json` in each full run, with
+  one entry per `checks.md` area: `checked`, `degraded` (no root, a missing tool, a failed section),
+  `skipped-by-operator`, `not-checked` or `needs-operator`, plus a reason.
+  - **`scripts/coverage.py seed <run>`** writes it, seeded from `collect.py`'s own skip and partial
+    markers in the inventory, and never overwrites an existing file.
+  - **`coverage.py gaps <host>`** lists what the previous run did not cover. Step 1 now starts with
+    it, so the gaps get priority.
+  - **`validate_findings.py --coverage`** checks that every area appears exactly once, that
+    non-checked areas give a reason, and that each not-checked / needs-operator area is named in
+    `findings.json`'s `not_checked` list.
+  - **`fleet.py compare`** adds a "coverage per host" table when the runs have `coverage.json`.
 - **Severity anchors.** The reachability × impact table stays as it is. Under it:
   - **Examples per level, for Linux hosts:** public Redis/Postgres without auth, `.env` over HTTP, a
     leaked secret that still works → HIGH; a sudo rule that is root in disguise, basic auth over
